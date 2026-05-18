@@ -28,6 +28,7 @@ function createSession(title = "新原型会话"): Session {
     referenceId: null,
     pinnedAt: null,
     titleLocked: false,
+    subPages: [],
   };
 }
 
@@ -218,6 +219,7 @@ export default function App() {
           referenceId: null,
           pinnedAt: null,
           titleLocked: false,
+          subPages: [],
         };
         newSessions.push(s);
         if (newSessions.length === files.length) {

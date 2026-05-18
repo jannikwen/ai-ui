@@ -10,6 +10,13 @@ export type ChatMessage = {
   createdAt: number;
 };
 
+export type SubPage = {
+  id: string;
+  title: string;
+  html: string;
+  isActive: boolean;
+};
+
 export type Session = {
   id: string;
   title: string;
@@ -25,6 +32,8 @@ export type Session = {
   pinnedAt: number | null;
   /** 标题是否被用户手动锁定（锁定后不随输入自动更新） */
   titleLocked: boolean;
+  /** 该会话下的多个子页面（标签页） */
+  subPages: SubPage[];
 };
 
 export type MainViewMode = "chat" | "preview" | "code";
