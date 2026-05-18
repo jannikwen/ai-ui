@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { finalizePrototypeHtml } from "../lib/prepareHtmlForTailwindCdn";
 import type { SelectedElement } from "../types";
 
@@ -21,12 +21,18 @@ function hashString(input: string): string {
   return (h >>> 0).toString(16);
 }
 
-/** 注入到 iframe 文档中的元素选择脚本 */
+/**
+ * 注入到 iframe 文档中的元素选择脚本。
+ * 始终注入（不依赖编辑模式），默认为停用状态。
+ * 通过监听父窗口 postMessage 的 'edit-mode-toggle' 消息来启用/停用。
+ */
 const ELEMENT_PICKER_SCRIPT = `
 <script>
 (function() {
   if (window.__elementPickerInstalled) return;
   window.__elementPickerInstalled = true;
+
+  var pickerEnabled = false;
 
   var overlay = document.createElement('div');
   overlay.id = '__element-picker-overlay';
@@ -76,18 +82,26 @@ const ELEMENT_PICKER_SCRIPT = `
     };
   }
 
-  document.addEventListener('mouseover', function(e) {
+  function clearOverlays() {
+    overlay.style.display = 'none';
+    selectedOverlay.style.display = 'none';
+    selectedEl = null;
+  }
+
+  function onMouseOver(e) {
+    if (!pickerEnabled) return;
     if (!e.target || e.target === document.documentElement || e.target === document.body) return;
     if (e.target.id === '__element-picker-overlay' || e.target.id === '__element-picker-selected') return;
     if (!isVisible(e.target)) { overlay.style.display = 'none'; return; }
     updateOverlay(e.target);
-  }, true);
+  }
 
-  document.addEventListener('mouseout', function(e) {
+  function onMouseOut(e) {
     overlay.style.display = 'none';
-  }, true);
+  }
 
-  document.addEventListener('click', function(e) {
+  function onClick(e) {
+    if (!pickerEnabled) return;
     if (!e.target || e.target === document.documentElement || e.target === document.body) return;
     if (e.target.id === '__element-picker-overlay' || e.target.id === '__element-picker-selected') return;
     if (!isVisible(e.target)) return;
@@ -99,20 +113,36 @@ const ELEMENT_PICKER_SCRIPT = `
       type: 'element-selected',
       element: extractElementInfo(selectedEl)
     }, '*');
-  }, true);
+  }
 
-  window.addEventListener('scroll', function() {
-    if (selectedEl) updateSelectedOverlay(selectedEl);
-  }, true);
+  function onScroll() {
+    if (pickerEnabled && selectedEl) updateSelectedOverlay(selectedEl);
+  }
 
-  window.addEventListener('resize', function() {
-    if (selectedEl) updateSelectedOverlay(selectedEl);
-  }, true);
+  function onResize() {
+    if (pickerEnabled && selectedEl) updateSelectedOverlay(selectedEl);
+  }
+
+  document.addEventListener('mouseover', onMouseOver, true);
+  document.addEventListener('mouseout', onMouseOut, true);
+  document.addEventListener('click', onClick, true);
+  window.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onResize, true);
+
+  /* 监听父窗口的启用/停用指令 */
+  window.addEventListener('message', function(e) {
+    if (e.data?.type === 'edit-mode-toggle') {
+      pickerEnabled = !!e.data.enabled;
+      if (!pickerEnabled) {
+        clearOverlays();
+      }
+    }
+  });
 })();
 </script>
 `;
 
-/** 在 HTML 的 </body> 前注入元素选择脚本 */
+/** 在 HTML 的 </body> 前注入元素选择脚本（始终注入） */
 function injectPickerScript(html: string): string {
   if (/<\/body>/i.test(html)) {
     return html.replace(/<\/body>/i, ELEMENT_PICKER_SCRIPT + "\n</body>");
@@ -124,26 +154,29 @@ function injectPickerScript(html: string): string {
  * 使用 iframe + srcDoc 在浏览器侧沙箱渲染从 Markdown 中抽取的完整 HTML 文档。
  * 通过 `sandbox` 限制顶层导航等能力，同时允许脚本以支持 Tailwind CDN 等场景。
  * 同时监听 iframe 内 postMessage 导航请求，实现跨会话跳转。
- * 编辑模式下可悬停/点击选中页面元素。
+ * 编辑模式下通过 postMessage 启用元素选择，不重建 iframe，保留当前页面状态。
  */
 export function PreviewSandbox({ html, onNavigate, editMode, onElementSelect }: Props) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
   const baseSrcDoc = useMemo(
     () => (html ? finalizePrototypeHtml(html) : ""),
     [html],
   );
 
-  /** 编辑模式下注入元素选择脚本 */
+  /** 始终注入选择脚本，不依赖编辑模式 */
   const srcDoc = useMemo(() => {
     if (!baseSrcDoc) return "";
-    return editMode ? injectPickerScript(baseSrcDoc) : baseSrcDoc;
-  }, [baseSrcDoc, editMode]);
+    return injectPickerScript(baseSrcDoc);
+  }, [baseSrcDoc]);
 
+  /* iframeKey 不依赖 editMode，避免重建 */
   const iframeKey = useMemo(
-    () => (srcDoc ? hashString(srcDoc) : "empty"),
-    [srcDoc],
+    () => (baseSrcDoc ? hashString(baseSrcDoc) : "empty"),
+    [baseSrcDoc],
   );
 
-  /* 监听 iframe 内 postMessage 导航请求 */
+  /* 监听 iframe 内 postMessage（导航请求 + 元素选中） */
   const onNavigateRef = useRef(onNavigate);
   onNavigateRef.current = onNavigate;
 
@@ -161,6 +194,27 @@ export function PreviewSandbox({ html, onNavigate, editMode, onElementSelect }: 
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
+  }, []);
+
+  /* 当 editMode 变化时，通过 postMessage 通知 iframe 启用/停用选择脚本 */
+  useEffect(() => {
+    const iframeWin = iframeRef.current?.contentWindow;
+    if (iframeWin) {
+      iframeWin.postMessage({ type: "edit-mode-toggle", enabled: editMode }, "*");
+    }
+  }, [editMode]);
+
+  const onEditModeRef = useRef(editMode);
+  onEditModeRef.current = editMode;
+
+  const handleLoad = useCallback(() => {
+    const iframeWin = iframeRef.current?.contentWindow;
+    if (iframeWin) {
+      iframeWin.postMessage(
+        { type: "edit-mode-toggle", enabled: onEditModeRef.current },
+        "*",
+      );
+    }
   }, []);
 
   if (!html) {
@@ -200,12 +254,14 @@ export function PreviewSandbox({ html, onNavigate, editMode, onElementSelect }: 
       </div>
       <div className="relative min-h-0 flex-1 bg-white">
         <iframe
+          ref={iframeRef}
           key={iframeKey}
           title="AI 原型预览"
           className="h-full w-full border-0"
           srcDoc={srcDoc}
           sandbox="allow-scripts allow-forms allow-popups allow-modals"
           referrerPolicy="no-referrer"
+          onLoad={handleLoad}
         />
       </div>
     </div>
