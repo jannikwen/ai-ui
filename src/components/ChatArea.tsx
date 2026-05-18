@@ -1,6 +1,6 @@
-import { Bot, Moon, Sun, User } from "lucide-react";
+import { Bot, Edit3, Moon, Sun, User } from "lucide-react";
 import { assistantChatDisplayText } from "../lib/extractHtmlFromMarkdown";
-import type { ChatMessage, MainViewMode } from "../types";
+import type { ChatMessage, MainViewMode, SelectedElement } from "../types";
 import { PreviewSandbox } from "./PreviewSandbox";
 import { CodePanel } from "./CodePanel";
 
@@ -15,6 +15,11 @@ type Props = {
   onToggleTheme: () => void;
   /** iframe 内跨会话导航回调 */
   onPreviewNavigate?: (sessionId: string) => void;
+  /** 编辑模式开关 */
+  editMode: boolean;
+  onEditModeChange: (enabled: boolean) => void;
+  /** 编辑模式下选中元素的回调 */
+  onElementSelect?: (element: SelectedElement) => void;
 };
 
 function ModeButton({
@@ -49,6 +54,9 @@ export function ChatArea({
   appDark,
   onToggleTheme,
   onPreviewNavigate,
+  editMode,
+  onEditModeChange,
+  onElementSelect,
 }: Props) {
   const canInspectPrototype = extractedHtml !== null;
 
@@ -72,6 +80,24 @@ export function ChatArea({
           >
             {appDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
+
+          {/* 编辑模式切换按钮 */}
+          {viewMode === "preview" && canInspectPrototype && (
+            <button
+              type="button"
+              onClick={() => onEditModeChange(!editMode)}
+              className={`inline-flex h-9 items-center gap-1.5 rounded-xl border px-3 text-xs font-medium shadow-sm transition ${
+                editMode
+                  ? "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-600 dark:bg-amber-500/10 dark:text-amber-300"
+                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+              }`}
+              title={editMode ? "退出编辑模式" : "开启编辑模式，点击页面上的组件进行修改"}
+            >
+              <Edit3 className="h-3.5 w-3.5" />
+              {editMode ? "退出编辑" : "编辑"}
+            </button>
+          )}
+
           <div
             className={`inline-flex rounded-xl border border-slate-200/80 bg-slate-100/80 p-1 dark:border-slate-800 dark:bg-slate-900/80 ${
               canInspectPrototype ? "" : "pointer-events-none opacity-40"
@@ -104,7 +130,12 @@ export function ChatArea({
       <div className="relative min-h-0 flex-1">
         {viewMode === "preview" && (
           <div className="absolute inset-0 p-4">
-            <PreviewSandbox html={extractedHtml} onNavigate={onPreviewNavigate} />
+            <PreviewSandbox
+              html={extractedHtml}
+              onNavigate={onPreviewNavigate}
+              editMode={editMode}
+              onElementSelect={onElementSelect}
+            />
           </div>
         )}
 

@@ -38,4 +38,13 @@ export type Session = {
 
 export type MainViewMode = "chat" | "preview" | "code";
 
+/** 编辑模式下选中的 DOM 元素信息 */
+export type SelectedElement = {
+  tagName: string;
+  id: string;
+  className: string;
+  textContent: string;
+  outerHtml: string;
+};
+
 export type { StylePresetId as UIStyleId } from "./config/styles";

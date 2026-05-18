@@ -3,12 +3,13 @@ import { ChatArea } from "./components/ChatArea";
 import { InputBox } from "./components/InputBox";
 import { Sidebar } from "./components/Sidebar";
 import { StyleSelector } from "./components/StyleSelector";
+import { ElementEditPanel } from "./components/ElementEditPanel";
 import { chatWithLLM } from "./lib/chatWithLLM";
 import { extractFirstHtmlCodeBlock } from "./lib/extractHtmlFromMarkdown";
 import { extractTagsFromMessages } from "./lib/extractTags";
 import { finalizePrototypeHtml } from "./lib/prepareHtmlForTailwindCdn";
 import { injectNavLinksToNewPage } from "./lib/autoLinkSessions";
-import type { ChatMessage, MainViewMode, Session } from "./types";
+import type { ChatMessage, MainViewMode, SelectedElement, Session } from "./types";
 import type { StylePresetId } from "./config/styles";
 import { DEFAULT_STYLE_ID } from "./config/styles";
 
@@ -49,6 +50,8 @@ export default function App() {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   });
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [editMode, setEditMode] = useState(false);
+  const [selectedElement, setSelectedElement] = useState<SelectedElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -412,6 +415,96 @@ export default function App() {
     }
   };
 
+  /** 编辑模式下选中元素 */
+  const handleElementSelect = useCallback((element: SelectedElement) => {
+    setSelectedElement(element);
+  }, []);
+
+  /** 编辑模式下发送修改请求 */
+  const handleEditSend = useCallback(
+    async (instruction: string) => {
+      if (!activeSession.lastHtml || !selectedElement) return;
+
+      const editPrompt = `【当前页面完整 HTML】
+\`\`\`html
+${activeSession.lastHtml}
+\`\`\`
+
+【用户选中的组件】
+标签：${selectedElement.tagName}
+CSS 类：${selectedElement.className}
+HTML 片段：
+\`\`\`html
+${selectedElement.outerHtml}
+\`\`\`
+
+【修改要求】
+${instruction}
+
+请仅修改指定的组件，同时保持页面其他部分不变，输出修改后的**完整 HTML 文档**（含 \`\`\`html 围栏）。`;
+
+      const userMsg: ChatMessage = {
+        id: newId(),
+        role: "user",
+        content: editPrompt,
+        createdAt: Date.now(),
+      };
+
+      const historyForLlm: ChatMessage[] = [...activeSession.messages, userMsg];
+
+      upsertSession(activeId, (s) => ({
+        ...s,
+        updatedAt: Date.now(),
+        messages: [...s.messages, userMsg],
+      }));
+
+      setIsSending(true);
+      try {
+        const sessionsContext = sessions.map((s) => ({
+          id: s.id,
+          title: s.title,
+          hasHtml: !!s.lastHtml,
+        }));
+
+        const { content: replyContent, tags: aiTags } = await chatWithLLM(
+          historyForLlm,
+          [],
+          selectedStyle,
+          sessionsContext,
+          null,
+        );
+
+        const assistant: ChatMessage = {
+          id: newId(),
+          role: "assistant",
+          content: replyContent,
+          createdAt: Date.now(),
+        };
+
+        upsertSession(activeId, (s) => ({
+          ...s,
+          updatedAt: Date.now(),
+          tags: aiTags.length > 0 ? aiTags : s.tags,
+          messages: [...s.messages, assistant],
+        }));
+
+        const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
+        if (newHtml) {
+          upsertSession(activeId, (s) => ({
+            ...s,
+            lastHtml: newHtml,
+          }));
+        }
+
+        // 清除选中状态
+        setSelectedElement(null);
+      } finally {
+        setIsSending(false);
+      }
+    },
+    [activeId, activeSession, selectedElement, sessions, selectedStyle, upsertSession],
+  );
+
   return (
     <div className="h-full min-h-0 bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50">
       <input
@@ -458,9 +551,25 @@ export default function App() {
             appDark={dark}
             onToggleTheme={() => setDark((d) => !d)}
             onPreviewNavigate={onPreviewNavigate}
+            editMode={editMode}
+            onEditModeChange={(enabled) => {
+              setEditMode(enabled);
+              if (!enabled) setSelectedElement(null);
+            }}
+            onElementSelect={handleElementSelect}
           />
 
           <InputBox disabled={isSending} sessions={sessions} onSend={onSend} />
+
+          {/* 编辑模式浮动面板 */}
+          {editMode && selectedElement && (
+            <ElementEditPanel
+              element={selectedElement}
+              busy={isSending}
+              onSend={handleEditSend}
+              onClose={() => setSelectedElement(null)}
+            />
+          )}
         </div>
       </div>
     </div>
