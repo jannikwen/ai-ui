@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Loader2, Paperclip, SendHorizontal, X } from "lucide-react";
+import { Loader2, Paperclip, PauseCircle, PlayCircle, SendHorizontal, X } from "lucide-react";
 import type { Session } from "../types";
 
 export type PendingImage = {
@@ -10,6 +10,9 @@ export type PendingImage = {
 type Props = {
   disabled: boolean;
   sessions: Session[];
+  isSending?: boolean;
+  isPaused?: boolean;
+  onTogglePause?: () => void;
   onSend: (text: string, images: string[], refId: string | null) => void | Promise<void>;
 };
 
@@ -20,7 +23,7 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-export function InputBox({ disabled, sessions, onSend }: Props) {
+export function InputBox({ disabled, sessions, isSending, isPaused, onTogglePause, onSend }: Props) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<PendingImage[]>([]);
   const [busy, setBusy] = useState(false);
@@ -156,6 +159,32 @@ export function InputBox({ disabled, sessions, onSend }: Props) {
           >
             <Paperclip className="h-4 w-4" />
           </button>
+
+          {/* 暂停/恢复按钮 */}
+          {isSending && (
+            <button
+              type="button"
+              onClick={onTogglePause}
+              title={isPaused ? "恢复生成" : "暂停生成"}
+              className={`mb-1 inline-flex items-center gap-1 rounded-xl border px-3 py-2 text-xs font-medium transition ${
+                isPaused
+                  ? "border-green-200 bg-green-50 text-green-600 hover:bg-green-100 dark:border-green-800 dark:bg-green-950 dark:text-green-400 dark:hover:bg-green-900"
+                  : "border-amber-200 bg-amber-50 text-amber-600 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-400 dark:hover:bg-amber-900"
+              }`}
+            >
+              {isPaused ? (
+                <>
+                  <PlayCircle className="h-4 w-4" />
+                  恢复
+                </>
+              ) : (
+                <>
+                  <PauseCircle className="h-4 w-4" />
+                  暂停
+                </>
+              )}
+            </button>
+          )}
 
           {/* 引用原型下拉选择 */}
           {referableSessions.length > 0 && (

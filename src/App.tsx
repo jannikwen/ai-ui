@@ -53,6 +53,9 @@ export default function App() {
   const [editMode, setEditMode] = useState(false);
   const [selectedElement, setSelectedElement] = useState<SelectedElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const resumeParamsRef = useRef<{ text: string; images: string[]; refId: string | null } | null>(null);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -416,6 +419,9 @@ export default function App() {
       tags: extractTagsFromMessages([...s.messages, userMsg]),
     }));
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setIsPaused(false);
     setIsSending(true);
     try {
       const sessionsContext = sessions.map((s) => ({
@@ -442,6 +448,7 @@ export default function App() {
             ),
           }));
         },
+        controller.signal,
       );
 
       // 最终写入完整的助手回复
@@ -488,10 +495,42 @@ export default function App() {
           }
         }
       }
+    } catch (err: any) {
+      // 如果是用户主动暂停，不显示错误
+      if (err?.name === "AbortError" || isPaused) {
+        // 保持已收到的部分内容
+      } else {
+        throw err;
+      }
     } finally {
-      setIsSending(false);
+      if (isPaused) {
+        // 暂停状态：不清除 isSending 和 isPaused，等待恢复
+        abortRef.current = null;
+      } else {
+        setIsSending(false);
+        setIsPaused(false);
+        abortRef.current = null;
+        resumeParamsRef.current = null;
+      }
     }
   };
+
+  /** 暂停/继续发送 */
+  const onTogglePause = useCallback(() => {
+    if (isPaused) {
+      // 恢复：使用保存的参数重新发送
+      const params = resumeParamsRef.current;
+      if (params) {
+        resumeParamsRef.current = null;
+        setIsPaused(false);
+        void onSend(params.text, params.images, params.refId);
+      }
+      return;
+    }
+    // 暂停：中断当前请求（参数已在 onSend 开头保存）
+    setIsPaused(true);
+    abortRef.current?.abort();
+  }, [isPaused, onSend]);
 
   /** 编辑模式下选中元素 */
   const handleElementSelect = useCallback((element: SelectedElement) => {
@@ -638,7 +677,7 @@ ${instruction}
             onElementSelect={handleElementSelect}
           />
 
-          <InputBox disabled={isSending} sessions={sessions} onSend={onSend} />
+          <InputBox disabled={isSending && !isPaused} sessions={sessions} isSending={isSending} isPaused={isPaused} onTogglePause={onTogglePause} onSend={onSend} />
 
           {/* 编辑模式浮动面板 */}
           {editMode && selectedElement && (

@@ -254,10 +254,12 @@ async function openAiCompatibleChatStream(
   allSessions: SessionBrief[],
   refHtml: string | null,
   onChunk: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<LlmReply> {
   const { messages: payloadMessages } = await buildPayload(history, images, styleId, allSessions, refHtml);
 
   const res = await fetch(`${apiBase}/chat/completions`, {
+    signal,
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -367,13 +369,17 @@ export async function chatWithLLMStream(
   allSessions: SessionBrief[] = [],
   refHtml: string | null = null,
   onChunk: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<LlmReply> {
   const { apiBase, apiKey, model, useRealApi } = getLlmEnv();
   if (!useRealApi) {
     const content = await mockReply(history);
-    // 模拟逐字打字效果
+    // 模拟逐字打字效果（支持 AbortSignal 中断）
     let displayed = "";
     for (let i = 0; i < content.length; i++) {
+      if (signal?.aborted) {
+        return { content: displayed, tags: parseTagsFromReply(displayed) };
+      }
       displayed += content[i];
       onChunk(displayed);
       await new Promise((r) => setTimeout(r, 8 + Math.random() * 4));
@@ -393,5 +399,6 @@ export async function chatWithLLMStream(
     allSessions,
     refHtml,
     onChunk,
+    signal,
   );
 }
