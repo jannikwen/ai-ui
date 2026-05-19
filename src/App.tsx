@@ -55,7 +55,19 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [isPaused, setIsPaused] = useState(false);
-  const resumeParamsRef = useRef<{ text: string; images: string[]; refId: string | null } | null>(null);
+  const isPausedRef = useRef(false);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+
+  /** 暂停后恢复续传所需的核心上下文 */
+  const streamContextRef = useRef<{
+    sid: string;
+    historyForLlm: ChatMessage[];
+    images: string[];
+    sessionsContext: { id: string; title: string; hasHtml: boolean }[];
+    refHtml: string | null;
+    placeholderId: string;
+  } | null>(null);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -387,59 +399,38 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [sessions, checkedIds, exportSingle]);
 
-  const onSend = async (text: string, images: string[], refId: string | null) => {
-    const sid = activeId;
-    const userMsg: ChatMessage = {
-      id: newId(),
-      role: "user",
-      content: text,
-      imageDataUrls: images.length ? images : undefined,
-      createdAt: Date.now(),
-    };
-
-    // 先插入一条空的助手消息（占位，流式更新）
-    const placeholderId = newId();
-    const placeholderMsg: ChatMessage = {
-      id: placeholderId,
-      role: "assistant",
-      content: "",
-      createdAt: Date.now() + 1,
-    };
-
-    const historyForLlm: ChatMessage[] = [...activeSession.messages, userMsg];
-
-    upsertSession(sid, (s) => ({
-      ...s,
-      title: s.titleLocked
-        ? s.title
-        : text.trim().slice(0, 40) ||
-          (images.length ? `图片附件 · ${images.length}` : s.title),
-      updatedAt: Date.now(),
-      messages: [...s.messages, userMsg, placeholderMsg],
-      tags: extractTagsFromMessages([...s.messages, userMsg]),
-    }));
-
+  /** 执行流式请求（首次发送 & 恢复续传共用） */
+  const doStream = async (
+    sid: string,
+    historyForLlm: ChatMessage[],
+    images: string[],
+    sessionsContext: { id: string; title: string; hasHtml: boolean }[],
+    refHtml: string | null,
+    placeholderId: string,
+  ) => {
     const controller = new AbortController();
     abortRef.current = controller;
-    setIsPaused(false);
+
+    // 保存暂停恢复所需的上下文
+    streamContextRef.current = {
+      sid,
+      historyForLlm,
+      images,
+      sessionsContext,
+      refHtml,
+      placeholderId,
+    };
+
     setIsSending(true);
+    setIsPaused(false);
+    isPausedRef.current = false;
     try {
-      const sessionsContext = sessions.map((s) => ({
-        id: s.id,
-        title: s.title,
-        hasHtml: !!s.lastHtml,
-      }));
-
-      const refSession = refId ? sessions.find((s) => s.id === refId) : null;
-      const refHtml = refSession?.lastHtml ?? null;
-
       const { content: replyContent, tags: aiTags } = await chatWithLLMStream(
         historyForLlm,
         images,
         selectedStyle,
         sessionsContext,
         refHtml,
-        // 每收到一个 token 就更新占位助手消息
         (streamedText) => {
           upsertSession(sid, (s) => ({
             ...s,
@@ -474,9 +465,10 @@ export default function App() {
         setViewMode("preview");
       }
 
-      // ── 自动添加导航链接到新页面（后台，不阻塞用户） ──
+      // 自动添加导航链接到新页面
       if (newHtml) {
-        const allWithHtml = sessions
+        const currentSessions = sessions; // 在闭包中捕获当前 sessions
+        const allWithHtml = currentSessions
           .filter((s) => s.lastHtml)
           .map((s) => ({
             id: s.id,
@@ -496,41 +488,92 @@ export default function App() {
         }
       }
     } catch (err: any) {
-      // 如果是用户主动暂停，不显示错误
-      if (err?.name === "AbortError" || isPaused) {
-        // 保持已收到的部分内容
+      if (err?.name === "AbortError" || isPausedRef.current) {
+        // 用户主动暂停，保持已收到的部分内容
       } else {
         throw err;
       }
     } finally {
-      if (isPaused) {
+      if (isPausedRef.current) {
         // 暂停状态：不清除 isSending 和 isPaused，等待恢复
         abortRef.current = null;
       } else {
         setIsSending(false);
         setIsPaused(false);
+        isPausedRef.current = false;
         abortRef.current = null;
-        resumeParamsRef.current = null;
+        streamContextRef.current = null;
       }
     }
+  };
+
+  const onSend = async (text: string, images: string[], refId: string | null) => {
+    const sid = activeId;
+    const userMsg: ChatMessage = {
+      id: newId(),
+      role: "user",
+      content: text,
+      imageDataUrls: images.length ? images : undefined,
+      createdAt: Date.now(),
+    };
+
+    const placeholderId = newId();
+    const placeholderMsg: ChatMessage = {
+      id: placeholderId,
+      role: "assistant",
+      content: "",
+      createdAt: Date.now() + 1,
+    };
+
+    const historyForLlm: ChatMessage[] = [...activeSession.messages, userMsg];
+
+    upsertSession(sid, (s) => ({
+      ...s,
+      title: s.titleLocked
+        ? s.title
+        : text.trim().slice(0, 40) ||
+          (images.length ? `图片附件 · ${images.length}` : s.title),
+      updatedAt: Date.now(),
+      messages: [...s.messages, userMsg, placeholderMsg],
+      tags: extractTagsFromMessages([...s.messages, userMsg]),
+    }));
+
+    const sessionsContext = sessions.map((s) => ({
+      id: s.id,
+      title: s.title,
+      hasHtml: !!s.lastHtml,
+    }));
+
+    const refSession = refId ? sessions.find((s) => s.id === refId) : null;
+    const refHtml = refSession?.lastHtml ?? null;
+
+    await doStream(sid, historyForLlm, images, sessionsContext, refHtml, placeholderId);
   };
 
   /** 暂停/继续发送 */
   const onTogglePause = useCallback(() => {
     if (isPaused) {
-      // 恢复：使用保存的参数重新发送
-      const params = resumeParamsRef.current;
-      if (params) {
-        resumeParamsRef.current = null;
-        setIsPaused(false);
-        void onSend(params.text, params.images, params.refId);
-      }
+      // 恢复：使用原始保存的 historyForLlm（末尾是用户消息，不含占位助手消息）
+      // 已生成的部分内容已保留在占位消息中，doStream 恢复后继续向同一 placeholderId 写入
+      const ctx = streamContextRef.current;
+      if (!ctx) return;
+      streamContextRef.current = null;
+
+      void doStream(
+        ctx.sid,
+        ctx.historyForLlm,
+        ctx.images,
+        ctx.sessionsContext,
+        ctx.refHtml,
+        ctx.placeholderId,
+      );
       return;
     }
-    // 暂停：中断当前请求（参数已在 onSend 开头保存）
+    // 暂停：中断当前请求
     setIsPaused(true);
+    isPausedRef.current = true;
     abortRef.current?.abort();
-  }, [isPaused, onSend]);
+  }, [isPaused]);
 
   /** 编辑模式下选中元素 */
   const handleElementSelect = useCallback((element: SelectedElement) => {
