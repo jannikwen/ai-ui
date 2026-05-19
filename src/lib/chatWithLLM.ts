@@ -17,7 +17,17 @@ export type LlmReply = {
   tags: string[];
 };
 
-function buildSystemPrompt(styleId: StylePresetId, allSessions: SessionBrief[], refHtml: string | null): string {
+function buildSystemPrompt(styleId: StylePresetId, allSessions: SessionBrief[], refHtml: string | null, resumeMode = false): string {
+  // 恢复续写模式：只用极简指令，不包含任何 HTML 生成/风格/跨会话等系统提示词
+  // 让 LLM 完全根据对话上下文自然续写
+  if (resumeMode) {
+    return [
+      "你正在续写一条被中断的消息。",
+      "直接从未完成处继续写，不要打招呼、不要解释、不要开新话题。",
+      "必须保持与上文相同的风格、格式和内容方向，无缝衔接。",
+    ].join("\n");
+  }
+
   const style = getStyleById(styleId);
   return [
     "你是资深前端与 UI 原型助手。",
@@ -171,7 +181,7 @@ function parseTagsFromReply(reply: string): string[] {
     .filter((t) => t.length >= 2 && t.length <= 10);
 }
 
-async function buildPayload(history: ChatMessage[], images: string[], styleId: StylePresetId, allSessions: SessionBrief[], refHtml: string | null): Promise<{ messages: OpenAIChatMessage[] }> {
+async function buildPayload(history: ChatMessage[], images: string[], styleId: StylePresetId, allSessions: SessionBrief[], refHtml: string | null, resumeMode = false): Promise<{ messages: OpenAIChatMessage[] }> {
   if (!history.length || history[history.length - 1]!.role !== "user") {
     throw new Error("chatWithLLM：历史最后一条必须是用户消息");
   }
@@ -179,7 +189,7 @@ async function buildPayload(history: ChatMessage[], images: string[], styleId: S
   const prepared = prepareHistoryForOpenAi(history);
 
   const payloadMessages: OpenAIChatMessage[] = [
-    { role: "system", content: buildSystemPrompt(styleId, allSessions, refHtml) },
+    { role: "system", content: buildSystemPrompt(styleId, allSessions, refHtml, resumeMode) },
     ...prepared.map((m, idx): OpenAIChatMessage => {
       const isLast = idx === prepared.length - 1;
       if (m.role === "user") {
@@ -255,8 +265,9 @@ async function openAiCompatibleChatStream(
   refHtml: string | null,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  resumeMode = false,
 ): Promise<LlmReply> {
-  const { messages: payloadMessages } = await buildPayload(history, images, styleId, allSessions, refHtml);
+  const { messages: payloadMessages } = await buildPayload(history, images, styleId, allSessions, refHtml, resumeMode);
 
   const res = await fetch(`${apiBase}/chat/completions`, {
     signal,
@@ -370,6 +381,7 @@ export async function chatWithLLMStream(
   refHtml: string | null = null,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  resumeMode = false,
 ): Promise<LlmReply> {
   const { apiBase, apiKey, model, useRealApi } = getLlmEnv();
   if (!useRealApi) {
@@ -400,5 +412,6 @@ export async function chatWithLLMStream(
     refHtml,
     onChunk,
     signal,
+    resumeMode,
   );
 }

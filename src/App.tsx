@@ -59,15 +59,20 @@ export default function App() {
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
 
-  /** 暂停后恢复续传所需的核心上下文 */
-  const streamContextRef = useRef<{
-    sid: string;
-    historyForLlm: ChatMessage[];
-    images: string[];
-    sessionsContext: { id: string; title: string; hasHtml: boolean }[];
-    refHtml: string | null;
-    placeholderId: string;
-  } | null>(null);
+  /** 暂停后恢复续传所需的核心上下文，按会话 ID 独立存储 */
+  const streamContextMapRef = useRef<
+    Map<
+      string,
+      {
+        sid: string;
+        historyForLlm: ChatMessage[];
+        images: string[];
+        sessionsContext: { id: string; title: string; hasHtml: boolean }[];
+        refHtml: string | null;
+        placeholderId: string;
+      }
+    >
+  >(new Map());
 
   useEffect(() => {
     const root = document.documentElement;
@@ -399,7 +404,9 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [sessions, checkedIds, exportSingle]);
 
-  /** 执行流式请求（首次发送 & 恢复续传共用） */
+  /** 执行流式请求（首次发送 & 恢复续传共用）
+   *  @param resumeFrom - 恢复续传时传入已生成的部分内容，流式回调会在此内容后追加新文本
+   */
   const doStream = async (
     sid: string,
     historyForLlm: ChatMessage[],
@@ -407,19 +414,21 @@ export default function App() {
     sessionsContext: { id: string; title: string; hasHtml: boolean }[],
     refHtml: string | null,
     placeholderId: string,
+    resumeFrom = "",
+    resumeMode = false,
   ) => {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // 保存暂停恢复所需的上下文
-    streamContextRef.current = {
+    // 保存暂停恢复所需的上下文（按会话 ID 独立存储）
+    streamContextMapRef.current.set(sid, {
       sid,
       historyForLlm,
       images,
       sessionsContext,
       refHtml,
       placeholderId,
-    };
+    });
 
     setIsSending(true);
     setIsPaused(false);
@@ -435,24 +444,28 @@ export default function App() {
           upsertSession(sid, (s) => ({
             ...s,
             messages: s.messages.map((m) =>
-              m.id === placeholderId ? { ...m, content: streamedText, createdAt: m.createdAt } : m,
+              m.id === placeholderId
+                ? { ...m, content: resumeFrom + streamedText, createdAt: m.createdAt }
+                : m,
             ),
           }));
         },
         controller.signal,
+        resumeMode,
       );
 
       // 最终写入完整的助手回复
+      const fullContent = resumeFrom + replyContent;
       upsertSession(sid, (s) => ({
         ...s,
         updatedAt: Date.now(),
         tags: aiTags.length > 0 ? aiTags : s.tags,
         messages: s.messages.map((m) =>
-          m.id === placeholderId ? { ...m, content: replyContent, createdAt: Date.now() } : m,
+          m.id === placeholderId ? { ...m, content: fullContent, createdAt: Date.now() } : m,
         ),
       }));
 
-      const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
+      const newHtml = extractFirstHtmlCodeBlock(fullContent) ?? null;
 
       upsertSession(sid, (s) => ({
         ...s,
@@ -502,7 +515,7 @@ export default function App() {
         setIsPaused(false);
         isPausedRef.current = false;
         abortRef.current = null;
-        streamContextRef.current = null;
+        streamContextMapRef.current.delete(sid);
       }
     }
   };
@@ -553,19 +566,42 @@ export default function App() {
   /** 暂停/继续发送 */
   const onTogglePause = useCallback(() => {
     if (isPaused) {
-      // 恢复：使用原始保存的 historyForLlm（末尾是用户消息，不含占位助手消息）
-      // 已生成的部分内容已保留在占位消息中，doStream 恢复后继续向同一 placeholderId 写入
-      const ctx = streamContextRef.current;
+      // 恢复：按当前活跃会话获取独立的上下文
+      const ctx = streamContextMapRef.current.get(activeId);
       if (!ctx) return;
-      streamContextRef.current = null;
+      streamContextMapRef.current.delete(activeId);
+
+      const currentSession = sessionsRef.current.find((s) => s.id === ctx.sid);
+      const placeholderMsg = currentSession?.messages.find((m) => m.id === ctx.placeholderId);
+      const partialContent = placeholderMsg?.content?.trim() || "";
+
+      // 把已生成内容作为 assistant 消息插入历史，再加简短续写指令
+      // 这样不会触发 system prompt 的"用户给出原型就生成 HTML"逻辑
+      const historyForLlm: ChatMessage[] = [
+        ...ctx.historyForLlm,
+        {
+          id: "__resume_assistant__",
+          role: "assistant",
+          content: partialContent,
+          createdAt: Date.now(),
+        },
+        {
+          id: "__resume_user__",
+          role: "user",
+          content: "【续写】接上，从断点直接继续。不要打招呼、不解释、不重复已写内容，只输出续写。",
+          createdAt: Date.now(),
+        },
+      ];
 
       void doStream(
         ctx.sid,
-        ctx.historyForLlm,
+        historyForLlm,
         ctx.images,
         ctx.sessionsContext,
         ctx.refHtml,
         ctx.placeholderId,
+        partialContent, // 前端恢复时先拼接已有内容
+        true, // resumeMode
       );
       return;
     }
