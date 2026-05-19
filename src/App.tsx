@@ -188,51 +188,116 @@ export default function App() {
     fileInputRef.current?.click();
   }, []);
 
-  const handleImportFiles = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files?.length) return;
-    const newSessions: Session[] = [];
-    for (const file of files) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const html = String(reader.result ?? "");
-        if (!html.trim()) return;
-        const name = file.name.replace(/\.html$/i, "").trim() || "导入原型";
-        const now = Date.now();
-        const s: Session = {
-          id: newId(),
-          title: name,
-          updatedAt: now,
-          messages: [
-            {
-              id: newId(),
-              role: "user",
-              content: `导入原型文件：${file.name}`,
-              createdAt: now,
-            },
-            {
-              id: newId(),
-              role: "assistant",
-              content: `已导入原型文件。\n\n\`\`\`html\n${html}\n\`\`\``,
-              createdAt: now + 1,
-            },
-          ],
-          lastHtml: html,
-          tags: extractTagsFromMessages([{ role: "user", content: name }]),
-          referenceId: null,
-          pinnedAt: null,
-          titleLocked: false,
-          subPages: [],
+  const handleImportFiles = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files?.length) return;
+      const fileList = Array.from(files);
+
+      // 清除 input value，允许重复选择同一文件
+      e.target.value = "";
+
+      let completed = 0;
+      const total = fileList.length;
+      const newSessions: Session[] = [];
+      const errors: string[] = [];
+
+      for (const file of fileList) {
+        const reader = new FileReader();
+
+        reader.onload = () => {
+          const html = String(reader.result ?? "");
+          if (!html.trim()) {
+            errors.push(`文件 ${file.name} 内容为空，已跳过`);
+            completed++;
+            checkDone();
+            return;
+          }
+
+          const name =
+            file.name.replace(/\.html$/i, "").trim() || "导入原型";
+          const now = Date.now();
+          const s: Session = {
+            id: newId(),
+            title: name,
+            updatedAt: now,
+            messages: [
+              {
+                id: newId(),
+                role: "user" as const,
+                content: `导入原型文件：${file.name}`,
+                createdAt: now,
+              },
+              {
+                id: newId(),
+                role: "assistant" as const,
+                content: `已导入原型文件。\n\n\`\`\`html\n${html}\n\`\`\``,
+                createdAt: now + 1,
+              },
+            ],
+            lastHtml: html,
+            tags: extractTagsFromMessages([
+              { role: "user" as const, content: name },
+            ]),
+            referenceId: null,
+            pinnedAt: null,
+            titleLocked: false,
+            subPages: [],
+          };
+          newSessions.push(s);
+          completed++;
+          checkDone();
         };
-        newSessions.push(s);
-        if (newSessions.length === files.length) {
+
+        reader.onerror = () => {
+          errors.push(`读取文件 ${file.name} 失败（可能编码不受支持，请使用 UTF-8 编码）`);
+          completed++;
+          checkDone();
+        };
+
+        reader.readAsText(file, "UTF-8");
+      }
+
+      function checkDone() {
+        if (completed < total) return;
+        if (errors.length > 0) {
+          setActiveId(() => {
+            // 用一个新的临时会话展示导入错误信息
+            const errorSession: Session = {
+              id: newId(),
+              title: "导入报告",
+              updatedAt: Date.now(),
+              messages: [
+                {
+                  id: newId(),
+                  role: "assistant" as const,
+                  content: `**导入完成**\n\n成功导入 ${newSessions.length} 个文件。\n\n${errors.length > 0 ? `以下文件导入失败：\n${errors.map((e) => `- ${e}`).join("\n")}` : ""}`,
+                  createdAt: Date.now(),
+                },
+              ],
+              lastHtml: null,
+              tags: [],
+              referenceId: null,
+              pinnedAt: null,
+              titleLocked: false,
+              subPages: [],
+            };
+            setSessions((prev) =>
+              newSessions.length > 0
+                ? [...newSessions, errorSession, ...prev]
+                : [errorSession, ...prev],
+            );
+            return errorSession.id;
+          });
+        } else if (newSessions.length > 0) {
           setSessions((prev) => [...newSessions, ...prev]);
+          // 展示导入结果
+          setActiveId(newSessions[newSessions.length - 1].id);
         }
-      };
-      reader.readAsText(file);
-    }
-    e.target.value = "";
-  }, []);
+      }
+    },
+    [],
+  );
 
   /* ── 单个会话导出 ── */
   const exportSingle = useCallback((s: Session) => {
