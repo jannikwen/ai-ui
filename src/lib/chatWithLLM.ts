@@ -23,9 +23,9 @@ function buildSystemPrompt(styleId: StylePresetId, allSessions: SessionBrief[], 
     "你是资深前端与 UI 原型助手。",
     "当用户需要界面原型时，用中文简要说明思路，然后给出**一个** Markdown 围栏代码块：语言标记为 html，",
     "内容为**完整可运行的 HTML 文档**（含 <!DOCTYPE html>",
-    "自定义样式请写普通 CSS；**禁止**在 <style> 中使用 @apply（Tailwind CDN 无法在浏览器编译 @apply，会导致预览异常）。",
+    "自定义样式请写普通 CSS。",
     "不要在 html 围栏外再嵌套第二层 ```。",
-    "**严格禁止使用任何联网的外部资源**：不得引入 Google Fonts、外部 CDN 的 JS/CSS 库、外部图片、第三方 API 等（Tailwind CDN 除外）。",
+    "**严格禁止使用任何联网的外部资源**：不得引入 Google Fonts、外部 CDN 的 JS/CSS 库、外部图片、第三方 API 等。",
     "所有图标请使用内联 SVG 或纯文本/emoji 代替，不得依赖外部图标库。所有字体使用系统默认栈（如 system-ui, -apple-system 等），不得加载外部字体。",
     "对话可能是多轮：若用户在已有原型上提出修改，请阅读前文（尤其**最新一条助手消息**里给出的完整 HTML），",
     "输出**整合修改后的完整 HTML 文档**（新的 ```html 围栏），不要只回复文字说明而不给出新的 html 代码块，也不要只输出增量片段。",
@@ -171,16 +171,7 @@ function parseTagsFromReply(reply: string): string[] {
     .filter((t) => t.length >= 2 && t.length <= 10);
 }
 
-async function openAiCompatibleChat(
-  history: ChatMessage[],
-  images: string[],
-  apiBase: string,
-  apiKey: string,
-  model: string,
-  styleId: StylePresetId,
-  allSessions: SessionBrief[],
-  refHtml: string | null,
-): Promise<LlmReply> {
+async function buildPayload(history: ChatMessage[], images: string[], styleId: StylePresetId, allSessions: SessionBrief[], refHtml: string | null): Promise<{ messages: OpenAIChatMessage[] }> {
   if (!history.length || history[history.length - 1]!.role !== "user") {
     throw new Error("chatWithLLM：历史最后一条必须是用户消息");
   }
@@ -197,6 +188,21 @@ async function openAiCompatibleChat(
       return { role: "assistant", content: m.content || "" };
     }),
   ];
+
+  return { messages: payloadMessages };
+}
+
+async function openAiCompatibleChat(
+  history: ChatMessage[],
+  images: string[],
+  apiBase: string,
+  apiKey: string,
+  model: string,
+  styleId: StylePresetId,
+  allSessions: SessionBrief[],
+  refHtml: string | null,
+): Promise<LlmReply> {
+  const { messages: payloadMessages } = await buildPayload(history, images, styleId, allSessions, refHtml);
 
   const res = await fetch(`${apiBase}/chat/completions`, {
     method: "POST",
@@ -235,6 +241,97 @@ async function openAiCompatibleChat(
 }
 
 /**
+ * 流式调用 OpenAI 兼容的 `/chat/completions`，每收到一个 token 就回调 onChunk。
+ * 返回完整的 LlmReply（流结束后解析最终文本和标签）。
+ */
+async function openAiCompatibleChatStream(
+  history: ChatMessage[],
+  images: string[],
+  apiBase: string,
+  apiKey: string,
+  model: string,
+  styleId: StylePresetId,
+  allSessions: SessionBrief[],
+  refHtml: string | null,
+  onChunk: (text: string) => void,
+): Promise<LlmReply> {
+  const { messages: payloadMessages } = await buildPayload(history, images, styleId, allSessions, refHtml);
+
+  const res = await fetch(`${apiBase}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.6,
+      stream: true,
+      messages: payloadMessages,
+    }),
+  });
+
+  if (!res.ok) {
+    const raw = await res.text();
+    let msg = raw.slice(0, 500);
+    try {
+      const data = JSON.parse(raw) as OpenAIChatResponse;
+      msg = data.error?.message ?? msg;
+    } catch { /* use raw */ }
+    throw new Error(`LLM 流式请求失败（${res.status}）：${msg}`);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    throw new Error("响应体不可读，无法启用流式处理");
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  let fullText = "";
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    // 最后一个不完整行留在 buffer 里
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data:")) continue;
+
+      const dataStr = trimmed.slice("data:".length).trim();
+      if (dataStr === "[DONE]") continue;
+
+      try {
+        const chunk = JSON.parse(dataStr) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+        };
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          fullText += delta;
+          onChunk(fullText);
+        }
+      } catch {
+        // 忽略无法解析的 SSE 行
+      }
+    }
+  }
+
+  if (!fullText) {
+    throw new Error("流式接口未返回任何内容");
+  }
+
+  return {
+    content: fullText,
+    tags: parseTagsFromReply(fullText),
+  };
+}
+
+/**
  * 通用大模型对话抽象：
  * - `history`：包含本轮用户在内的完整上下文（按时间排序，末条为用户）；
  * - `images`：仅作用于本轮用户消息的多模态附件（data URL）；
@@ -257,4 +354,44 @@ export async function chatWithLLM(
     };
   }
   return openAiCompatibleChat(history, images, apiBase, apiKey, model, styleId, allSessions, refHtml);
+}
+
+/**
+ * 流式版本：每收到一个 token 就回调 onChunk（传入当前累积的完整文本）。
+ * Mock 模式下会模拟逐字打字效果。
+ */
+export async function chatWithLLMStream(
+  history: ChatMessage[],
+  images: string[],
+  styleId: StylePresetId = "modern",
+  allSessions: SessionBrief[] = [],
+  refHtml: string | null = null,
+  onChunk: (text: string) => void,
+): Promise<LlmReply> {
+  const { apiBase, apiKey, model, useRealApi } = getLlmEnv();
+  if (!useRealApi) {
+    const content = await mockReply(history);
+    // 模拟逐字打字效果
+    let displayed = "";
+    for (let i = 0; i < content.length; i++) {
+      displayed += content[i];
+      onChunk(displayed);
+      await new Promise((r) => setTimeout(r, 8 + Math.random() * 4));
+    }
+    return {
+      content,
+      tags: ["登录页", "表单", "响应式"],
+    };
+  }
+  return openAiCompatibleChatStream(
+    history,
+    images,
+    apiBase,
+    apiKey,
+    model,
+    styleId,
+    allSessions,
+    refHtml,
+    onChunk,
+  );
 }

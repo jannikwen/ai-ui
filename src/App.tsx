@@ -4,7 +4,7 @@ import { InputBox } from "./components/InputBox";
 import { Sidebar } from "./components/Sidebar";
 import { StyleSelector } from "./components/StyleSelector";
 import { ElementEditPanel } from "./components/ElementEditPanel";
-import { chatWithLLM } from "./lib/chatWithLLM";
+import { chatWithLLM, chatWithLLMStream } from "./lib/chatWithLLM";
 import { extractFirstHtmlCodeBlock } from "./lib/extractHtmlFromMarkdown";
 import { extractTagsFromMessages } from "./lib/extractTags";
 import { finalizePrototypeHtml } from "./lib/prepareHtmlForTailwindCdn";
@@ -394,17 +394,25 @@ export default function App() {
       createdAt: Date.now(),
     };
 
+    // 先插入一条空的助手消息（占位，流式更新）
+    const placeholderId = newId();
+    const placeholderMsg: ChatMessage = {
+      id: placeholderId,
+      role: "assistant",
+      content: "",
+      createdAt: Date.now() + 1,
+    };
+
     const historyForLlm: ChatMessage[] = [...activeSession.messages, userMsg];
 
     upsertSession(sid, (s) => ({
       ...s,
-      // 只有未锁定的标题才自动更新
       title: s.titleLocked
         ? s.title
         : text.trim().slice(0, 40) ||
           (images.length ? `图片附件 · ${images.length}` : s.title),
       updatedAt: Date.now(),
-      messages: [...s.messages, userMsg],
+      messages: [...s.messages, userMsg, placeholderMsg],
       tags: extractTagsFromMessages([...s.messages, userMsg]),
     }));
 
@@ -419,25 +427,31 @@ export default function App() {
       const refSession = refId ? sessions.find((s) => s.id === refId) : null;
       const refHtml = refSession?.lastHtml ?? null;
 
-      const { content: replyContent, tags: aiTags } = await chatWithLLM(
+      const { content: replyContent, tags: aiTags } = await chatWithLLMStream(
         historyForLlm,
         images,
         selectedStyle,
         sessionsContext,
         refHtml,
+        // 每收到一个 token 就更新占位助手消息
+        (streamedText) => {
+          upsertSession(sid, (s) => ({
+            ...s,
+            messages: s.messages.map((m) =>
+              m.id === placeholderId ? { ...m, content: streamedText, createdAt: m.createdAt } : m,
+            ),
+          }));
+        },
       );
-      const assistant: ChatMessage = {
-        id: newId(),
-        role: "assistant",
-        content: replyContent,
-        createdAt: Date.now(),
-      };
 
+      // 最终写入完整的助手回复
       upsertSession(sid, (s) => ({
         ...s,
         updatedAt: Date.now(),
         tags: aiTags.length > 0 ? aiTags : s.tags,
-        messages: [...s.messages, assistant],
+        messages: s.messages.map((m) =>
+          m.id === placeholderId ? { ...m, content: replyContent, createdAt: Date.now() } : m,
+        ),
       }));
 
       const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
@@ -464,7 +478,6 @@ export default function App() {
           }));
 
         if (allWithHtml.length > 1) {
-          // 直接在当前页面的 HTML 底部注入指向其他页面的导航按钮（同步，不经过 LLM）
           const linkedHtml = injectNavLinksToNewPage(sid, allWithHtml);
           if (linkedHtml !== newHtml) {
             upsertSession(sid, (s) => ({
@@ -609,6 +622,7 @@ ${instruction}
           <StyleSelector selected={selectedStyle} onSelect={setSelectedStyle} />
 
           <ChatArea
+            busy={isSending}
             messages={activeSession.messages}
             viewMode={viewMode}
             onViewModeChange={setViewMode}

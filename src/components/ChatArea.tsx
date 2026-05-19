@@ -8,6 +8,8 @@ type Props = {
   messages: ChatMessage[];
   viewMode: MainViewMode;
   onViewModeChange: (mode: MainViewMode) => void;
+  /** 流式生成中 */
+  busy: boolean;
   /** 从最近一条助手消息中解析出的 HTML（用于预览 / 导出） */
   extractedHtml: string | null;
   /** 应用级暗色主题（影响代码面板背景等） */
@@ -50,6 +52,7 @@ export function ChatArea({
   messages,
   viewMode,
   onViewModeChange,
+  busy,
   extractedHtml,
   appDark,
   onToggleTheme,
@@ -167,7 +170,7 @@ export function ChatArea({
                 </div>
               )}
 
-              {messages.map((m) => (
+              {messages.map((m, idx) => (
                 <article
                   key={m.id}
                   className={`flex gap-3 ${
@@ -211,6 +214,11 @@ export function ChatArea({
                         ? assistantChatDisplayText(m.content)
                         : m.content}
                     </div>
+                    {busy &&
+                      m.role === "assistant" &&
+                      idx === messages.length - 1 && (
+                        <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-sky-500 align-text-bottom" />
+                      )}
                   </div>
                 </article>
               ))}
