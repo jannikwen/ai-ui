@@ -102,6 +102,14 @@ const ELEMENT_PICKER_SCRIPT = `
 
   function onClick(e) {
     if (!pickerEnabled) return;
+
+    /* 导航按钮不拦截，让 inline onclick 正常执行 */
+    var navBtn = e.target;
+    while (navBtn && navBtn !== document.documentElement) {
+      if (navBtn.hasAttribute && navBtn.hasAttribute('data-nav-btn')) return;
+      navBtn = navBtn.parentElement;
+    }
+
     if (!e.target || e.target === document.documentElement || e.target === document.body) return;
     if (e.target.id === '__element-picker-overlay' || e.target.id === '__element-picker-selected') return;
     if (!isVisible(e.target)) return;

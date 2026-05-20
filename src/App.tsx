@@ -191,6 +191,8 @@ export default function App() {
   };
 
   const onPreviewNavigate = (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    if (!target?.lastHtml) return; // 目标会话不存在或无 HTML，不做跳转
     setActiveId(sessionId);
     setViewMode("preview");
   };

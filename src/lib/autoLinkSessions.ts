@@ -38,7 +38,7 @@ export function injectNavLinksToNewPage(
   ${others
     .map(
       (o) =>
-        `<button onclick="window.parent.postMessage({type:'navigate',sessionId:'${escapeHtmlAttr(o.id)}'},'*')" style="padding:5px 14px;border-radius:999px;border:1px solid #d1d5db;background:#f9fafb;color:#374151;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .15s;" onmouseover="this.style.background='#e5e7eb';this.style.borderColor='#9ca3af'" onmouseout="this.style.background='#f9fafb';this.style.borderColor='#d1d5db'">${escapeHtmlAttr(o.title)}</button>`,
+        `<button type="button" data-nav-btn="true" onclick="window.parent.postMessage({type:'navigate',sessionId:'${escapeHtmlAttr(o.id)}'},'*')" style="padding:5px 14px;border-radius:999px;border:1px solid #d1d5db;background:#f9fafb;color:#374151;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .15s;" onmouseover="this.style.background='#e5e7eb';this.style.borderColor='#9ca3af'" onmouseout="this.style.background='#f9fafb';this.style.borderColor='#d1d5db'">${escapeHtmlAttr(o.title)}</button>`,
     )
     .join("")}
 </nav>
