@@ -2,7 +2,7 @@ import { getLlmEnv } from "../config/llmEnv";
 import { collapseHtmlPrototypeBlock } from "./extractHtmlFromMarkdown";
 import { DEMO_LOGIN_HTML } from "./mockHtml";
 import { getStyleById, type StylePresetId } from "../config/styles";
-import type { ChatMessage } from "../types";
+import type { ChatMessage, SelectedElement } from "../types";
 
 export type SessionBrief = {
   id: string;
@@ -414,4 +414,194 @@ export async function chatWithLLMStream(
     signal,
     resumeMode,
   );
+}
+
+/**
+ * 构建编辑模式专用的 prompt。
+ * 仅发送 HTML + 选中元素 + 用户修改要求，要求 LLM 返回结构化 JSON 修改命令。
+ */
+export function buildEditPrompt(
+  html: string,
+  element: SelectedElement,
+  instruction: string,
+): string {
+  return [
+    "你是 DOM 操作专家。请根据下方的 HTML 和用户修改要求，输出一个 JSON 格式的结构化修改命令。",
+    "",
+    "【重要规则】",
+    "1. 只输出合法的 JSON 对象，不要添加任何文字说明、Markdown 围栏或注释",
+    "2. 使用精确的 CSS 选择器定位目标元素（优先使用 id，其次用 class 组合）",
+    "3. 样式修改使用 setStyle action，直接设置 inline style 属性",
+    "4. 不要输出完整的 HTML，只输出修改命令 JSON",
+    "",
+    "【支持的 action 类型】",
+    `- setStyle: 修改内联样式
+      参数: selector, styles (对象，CSS 属性名: 值)
+      示例: {"action":"setStyle","selector":"#btn","styles":{"backgroundColor":"#ef4444","borderRadius":"8px"}}`,
+    `- setText: 替换文本内容
+      参数: selector, value
+      示例: {"action":"setText","selector":".title","value":"新标题"}`,
+    `- setAttribute: 设置 HTML 属性
+      参数: selector, name, value
+      示例: {"action":"setAttribute","selector":"input","name":"placeholder","value":"请输入"}`,
+    `- replaceClass: 替换单个 CSS 类名
+      参数: selector, oldClass, newClass
+      示例: {"action":"replaceClass","selector":".card","oldClass":"bg-white","newClass":"bg-gray-100"}`,
+    `- setHtml: 替换元素内部 HTML
+      参数: selector, html
+      示例: {"action":"setHtml","selector":".desc","html":"<p>新内容</p>"}`,
+    `- addClass: 添加 CSS 类名
+      参数: selector, class
+      示例: {"action":"addClass","selector":"#nav","class":"sticky"}`,
+    `- removeClass: 移除 CSS 类名
+      参数: selector, class
+      示例: {"action":"removeClass","selector":".banner","class":"hidden"}`,
+    `- setOuterHtml: 完全替换整个元素
+      参数: selector, outerHtml
+      示例: {"action":"setOuterHtml","selector":"#old","outerHtml":"<div id='new'>新元素</div>"}`,
+    `- addSibling: 在元素前后插入兄弟节点
+      参数: selector, position ("before" 或 "after"), html
+      示例: {"action":"addSibling","selector":"li:last-child","position":"after","html":"<li>新项目</li>"}`,
+    "",
+    "【输出格式】",
+    '{"commands": [...],"explanation": "简要说明修改内容"}',
+    "",
+    "【当前页面 HTML】",
+    "```html",
+    html,
+    "```",
+    "",
+    "【用户选中的元素（供你确定选择器）】",
+    `标签: <${element.tagName}>`,
+    `ID: ${element.id || "(无)"}`,
+    `CSS 类: ${element.className || "(无)"}`,
+    `文本内容: "${element.textContent}"`,
+    `完整 HTML:`,
+    "```html",
+    element.outerHtml,
+    "```",
+    "",
+    "【用户修改要求】",
+    instruction,
+    "",
+    "现在请输出修改命令 JSON：",
+  ].join("\n");
+}
+
+/**
+ * 编辑模式 Mock 回复：返回一条简单的 setStyle 命令。
+ */
+function mockEditReply(instruction: string, element: SelectedElement): string {
+  const selector = element.id
+    ? `#${element.id}`
+    : element.className
+      ? `.${element.className.split(" ")[0]}`
+      : element.tagName;
+
+  const cmd: any = {
+    action: "setStyle",
+    selector,
+    styles: {
+      backgroundColor: "#fef3c7",
+      border: "2px solid #f59e0b",
+      borderRadius: "8px",
+      boxShadow: "0 2px 8px rgba(245,158,11,0.2)",
+      padding: "8px 16px",
+    },
+  };
+
+  // 如果指令提到颜色词，尝试匹配
+  const colorMap: Record<string, string> = {
+    红色: "#ef4444",
+    蓝色: "#3b82f6",
+    绿色: "#22c55e",
+    黄色: "#eab308",
+    紫色: "#a855f7",
+    粉色: "#ec4899",
+    橙色: "#f97316",
+    灰色: "#6b7280",
+    黑色: "#000000",
+    白色: "#ffffff",
+  };
+
+  for (const [name, hex] of Object.entries(colorMap)) {
+    if (instruction.includes(name)) {
+      (cmd.styles as Record<string, string>).backgroundColor = hex;
+      break;
+    }
+  }
+
+  // 如果提到圆角
+  if (/圆角|rounded/.test(instruction)) {
+    (cmd.styles as Record<string, string>).borderRadius = "12px";
+  }
+
+  // 如果提到阴影
+  if (/阴影|shadow/.test(instruction)) {
+    (cmd.styles as Record<string, string>).boxShadow = "0 4px 12px rgba(0,0,0,0.15)";
+  }
+
+  return JSON.stringify({
+    commands: [cmd],
+    explanation: `Mock 模式：已将 "${(element.textContent || element.tagName).slice(0, 20)}" 的样式高亮为 ${Object.keys(colorMap).find((k) => instruction.includes(k)) || "黄色"}${/圆角|rounded/.test(instruction) ? "，添加圆角" : ""}${/阴影|shadow/.test(instruction) ? "，添加阴影" : ""}`,
+  });
+}
+
+/**
+ * 编辑模式专用 LLM 调用。
+ * 发送精简 prompt（仅 HTML + 选中元素 + 修改要求），
+ * 期望 LLM 返回结构化 JSON 修改命令，本地执行 DOM 操作。
+ */
+export async function chatWithLLMForEdit(
+  html: string,
+  element: SelectedElement,
+  instruction: string,
+): Promise<string> {
+  const { apiBase, apiKey, model, useRealApi } = getLlmEnv();
+
+  if (!useRealApi) {
+    // Mock 模式：模拟延迟后返回简单命令
+    await new Promise((r) => setTimeout(r, 500));
+    return mockEditReply(instruction, element);
+  }
+
+  const systemPrompt = buildEditPrompt(html, element, instruction);
+
+  const payloadMessages: OpenAIChatMessage[] = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: instruction },
+  ];
+
+  const res = await fetch(`${apiBase}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.3, // 编辑模式温度更低，追求确定性输出
+      messages: payloadMessages,
+    }),
+  });
+
+  const raw = await res.text();
+  let data: OpenAIChatResponse;
+  try {
+    data = JSON.parse(raw) as OpenAIChatResponse;
+  } catch {
+    throw new Error(`编辑模式接口返回非 JSON（HTTP ${res.status}）：${raw.slice(0, 500)}`);
+  }
+
+  if (!res.ok) {
+    const msg = data.error?.message ?? raw.slice(0, 500);
+    throw new Error(`编辑模式 LLM 请求失败（${res.status}）：${msg}`);
+  }
+
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) {
+    throw new Error("编辑模式：接口未返回 choices[0].message.content");
+  }
+
+  return text;
 }

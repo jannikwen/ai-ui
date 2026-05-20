@@ -4,7 +4,8 @@ import { InputBox } from "./components/InputBox";
 import { Sidebar } from "./components/Sidebar";
 import { StyleSelector } from "./components/StyleSelector";
 import { ElementEditPanel } from "./components/ElementEditPanel";
-import { chatWithLLM, chatWithLLMStream } from "./lib/chatWithLLM";
+import { chatWithLLM, chatWithLLMForEdit, chatWithLLMStream } from "./lib/chatWithLLM";
+import { extractEditCommands, applyEditCommands, generateEditExplanation } from "./lib/applyEditCommands";
 import { extractFirstHtmlCodeBlock } from "./lib/extractHtmlFromMarkdown";
 import { extractTagsFromMessages } from "./lib/extractTags";
 import { finalizePrototypeHtml } from "./lib/prepareHtmlForTailwindCdn";
@@ -616,12 +617,66 @@ export default function App() {
     setSelectedElement(element);
   }, []);
 
-  /** 编辑模式下发送修改请求 */
+  /** 编辑模式下发送修改请求（优化版：LLM 只返回结构化修改命令，本地执行 DOM 操作） */
   const handleEditSend = useCallback(
     async (instruction: string) => {
       if (!activeSession.lastHtml || !selectedElement) return;
 
-      const editPrompt = `【当前页面完整 HTML】
+      // 记录用户修改指令到聊天
+      const userMsg: ChatMessage = {
+        id: newId(),
+        role: "user",
+        content: `【编辑模式】修改选中组件（${selectedElement.tagName}${selectedElement.id ? `#${selectedElement.id}` : ""}）：${instruction}`,
+        createdAt: Date.now(),
+      };
+
+      upsertSession(activeId, (s) => ({
+        ...s,
+        updatedAt: Date.now(),
+        messages: [...s.messages, userMsg],
+      }));
+
+      setIsSending(true);
+      try {
+        // 调用编辑模式专用 LLM（只返回 JSON 修改命令，不返回完整 HTML）
+        const rawReply = await chatWithLLMForEdit(
+          activeSession.lastHtml,
+          selectedElement,
+          instruction,
+        );
+
+        // 从 LLM 回复中解析 JSON 命令
+        const commandsResult = extractEditCommands(rawReply);
+
+        if (commandsResult && commandsResult.commands.length > 0) {
+          // 本地执行 DOM 修改命令
+          const newHtml = applyEditCommands(activeSession.lastHtml, commandsResult.commands);
+
+          // 更新 HTML
+          upsertSession(activeId, (s) => ({
+            ...s,
+            lastHtml: newHtml,
+          }));
+
+          // 将修改说明记录为助手回复
+          const explanation = commandsResult.explanation ?? generateEditExplanation(commandsResult.commands);
+          const assistant: ChatMessage = {
+            id: newId(),
+            role: "assistant",
+            content: `✅ 已按要求修改组件\n\n${explanation}\n\n\`\`\`json\n${JSON.stringify(commandsResult, null, 2)}\n\`\`\``,
+            createdAt: Date.now(),
+          };
+
+          upsertSession(activeId, (s) => ({
+            ...s,
+            updatedAt: Date.now(),
+            messages: [...s.messages, assistant],
+          }));
+        } else {
+          // JSON 解析失败，降级到原有完整 HTML 生成模式
+          console.warn("[handleEditSend] 无法解析 LLM 返回的编辑命令，降级到完整生成模式");
+
+          const fallbackPrompt = `【当前页面完整 HTML】
 \`\`\`html
 ${activeSession.lastHtml}
 \`\`\`
@@ -639,63 +694,72 @@ ${instruction}
 
 请仅修改指定的组件，同时保持页面其他部分不变，输出修改后的**完整 HTML 文档**（含 \`\`\`html 围栏）。`;
 
-      const userMsg: ChatMessage = {
-        id: newId(),
-        role: "user",
-        content: editPrompt,
-        createdAt: Date.now(),
-      };
+          const sessionsContext = sessions.map((s) => ({
+            id: s.id,
+            title: s.title,
+            hasHtml: !!s.lastHtml,
+          }));
 
-      const historyForLlm: ChatMessage[] = [...activeSession.messages, userMsg];
+          const fallbackHistory: ChatMessage[] = [
+            ...activeSession.messages,
+            userMsg,
+            {
+              id: newId(),
+              role: "user",
+              content: fallbackPrompt,
+              createdAt: Date.now(),
+            },
+          ];
 
-      upsertSession(activeId, (s) => ({
-        ...s,
-        updatedAt: Date.now(),
-        messages: [...s.messages, userMsg],
-      }));
+          const { content: replyContent, tags: aiTags } = await chatWithLLM(
+            fallbackHistory,
+            [],
+            selectedStyle,
+            sessionsContext,
+            null,
+          );
 
-      setIsSending(true);
-      try {
-        const sessionsContext = sessions.map((s) => ({
-          id: s.id,
-          title: s.title,
-          hasHtml: !!s.lastHtml,
-        }));
+          const assistant: ChatMessage = {
+            id: newId(),
+            role: "assistant",
+            content: replyContent,
+            createdAt: Date.now(),
+          };
 
-        const { content: replyContent, tags: aiTags } = await chatWithLLM(
-          historyForLlm,
-          [],
-          selectedStyle,
-          sessionsContext,
-          null,
-        );
-
-        const assistant: ChatMessage = {
-          id: newId(),
-          role: "assistant",
-          content: replyContent,
-          createdAt: Date.now(),
-        };
-
-        upsertSession(activeId, (s) => ({
-          ...s,
-          updatedAt: Date.now(),
-          tags: aiTags.length > 0 ? aiTags : s.tags,
-          messages: [...s.messages, assistant],
-        }));
-
-        const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
-        if (newHtml) {
           upsertSession(activeId, (s) => ({
             ...s,
-            lastHtml: newHtml,
+            updatedAt: Date.now(),
+            tags: aiTags.length > 0 ? aiTags : s.tags,
+            messages: [...s.messages, assistant],
           }));
+
+          const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
+          if (newHtml) {
+            upsertSession(activeId, (s) => ({
+              ...s,
+              lastHtml: newHtml,
+            }));
+          }
         }
 
-        // 清除选中状态
-        setSelectedElement(null);
+        // 自动进入预览模式
+        setViewMode("preview");
+      } catch (err: any) {
+        // 编辑失败记录到聊天
+        const errorAssistant: ChatMessage = {
+          id: newId(),
+          role: "assistant",
+          content: `⚠️ 编辑请求失败：${err.message || "未知错误"}`,
+          createdAt: Date.now(),
+        };
+        upsertSession(activeId, (s) => ({
+          ...s,
+          messages: [...s.messages, errorAssistant],
+        }));
       } finally {
         setIsSending(false);
+        // 清除选中状态
+        setSelectedElement(null);
       }
     },
     [activeId, activeSession, selectedElement, sessions, selectedStyle, upsertSession],

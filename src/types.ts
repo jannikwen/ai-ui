@@ -47,4 +47,52 @@ export type SelectedElement = {
   outerHtml: string;
 };
 
+/** 单一编辑命令 */
+export type EditCommand = {
+  action: "setStyle";
+  selector: string;
+  styles: Record<string, string>;
+} | {
+  action: "setText";
+  selector: string;
+  value: string;
+} | {
+  action: "setAttribute";
+  selector: string;
+  name: string;
+  value: string;
+} | {
+  action: "replaceClass";
+  selector: string;
+  oldClass: string;
+  newClass: string;
+} | {
+  action: "setHtml";
+  selector: string;
+  html: string;
+} | {
+  action: "addClass";
+  selector: string;
+  class: string;
+} | {
+  action: "removeClass";
+  selector: string;
+  class: string;
+} | {
+  action: "setOuterHtml";
+  selector: string;
+  outerHtml: string;
+} | {
+  action: "addSibling";
+  selector: string;
+  position: "before" | "after";
+  html: string;
+};
+
+/** LLM 返回的结构化编辑指令 */
+export type EditCommandsResult = {
+  commands: EditCommand[];
+  explanation?: string;
+};
+
 export type { StylePresetId as UIStyleId } from "./config/styles";
