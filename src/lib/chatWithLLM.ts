@@ -605,3 +605,108 @@ export async function chatWithLLMForEdit(
 
   return text;
 }
+
+/**
+ * 编辑模式流式 LLM 调用。
+ * 每收到一个 token 就回调 onChunk（传入当前累积的完整文本），
+ * 流式结束后返回完整回复文本。
+ */
+export async function chatWithLLMForEditStream(
+  html: string,
+  element: SelectedElement,
+  instruction: string,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { apiBase, apiKey, model, useRealApi } = getLlmEnv();
+
+  if (!useRealApi) {
+    // Mock 模式：模拟逐字流式输出
+    const mockJson = mockEditReply(instruction, element);
+    let displayed = "";
+    for (let i = 0; i < mockJson.length; i++) {
+      if (signal?.aborted) return displayed;
+      displayed += mockJson[i];
+      onChunk(displayed);
+      await new Promise((r) => setTimeout(r, 8 + Math.random() * 4));
+    }
+    return mockJson;
+  }
+
+  const systemPrompt = buildEditPrompt(html, element, instruction);
+
+  const payloadMessages: OpenAIChatMessage[] = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: instruction },
+  ];
+
+  const res = await fetch(`${apiBase}/chat/completions`, {
+    signal,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.3,
+      stream: true,
+      messages: payloadMessages,
+    }),
+  });
+
+  if (!res.ok) {
+    const raw = await res.text();
+    let msg = raw.slice(0, 500);
+    try {
+      const data = JSON.parse(raw) as OpenAIChatResponse;
+      msg = data.error?.message ?? msg;
+    } catch { /* use raw */ }
+    throw new Error(`编辑模式流式请求失败（${res.status}）：${msg}`);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    throw new Error("编辑模式：响应体不可读，无法启用流式处理");
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  let fullText = "";
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data:")) continue;
+
+      const dataStr = trimmed.slice("data:".length).trim();
+      if (dataStr === "[DONE]") continue;
+
+      try {
+        const chunk = JSON.parse(dataStr) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+        };
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          fullText += delta;
+          onChunk(fullText);
+        }
+      } catch {
+        // 忽略无法解析的 SSE 行
+      }
+    }
+  }
+
+  if (!fullText) {
+    throw new Error("编辑模式流式接口未返回任何内容");
+  }
+
+  return fullText;
+}

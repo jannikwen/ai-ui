@@ -4,7 +4,7 @@ import { InputBox } from "./components/InputBox";
 import { Sidebar } from "./components/Sidebar";
 import { StyleSelector } from "./components/StyleSelector";
 import { ElementEditPanel } from "./components/ElementEditPanel";
-import { chatWithLLM, chatWithLLMForEdit, chatWithLLMStream } from "./lib/chatWithLLM";
+import { chatWithLLM, chatWithLLMForEditStream, chatWithLLMStream } from "./lib/chatWithLLM";
 import { extractEditCommands, applyEditCommands, generateEditExplanation } from "./lib/applyEditCommands";
 import { extractFirstHtmlCodeBlock } from "./lib/extractHtmlFromMarkdown";
 import { extractTagsFromMessages } from "./lib/extractTags";
@@ -55,6 +55,7 @@ export default function App() {
   const [selectedElement, setSelectedElement] = useState<SelectedElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const editAbortRef = useRef<AbortController | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const isPausedRef = useRef(false);
   const sessionsRef = useRef(sessions);
@@ -617,7 +618,14 @@ export default function App() {
     setSelectedElement(element);
   }, []);
 
-  /** 编辑模式下发送修改请求（优化版：LLM 只返回结构化修改命令，本地执行 DOM 操作） */
+  /** 编辑模式下停止输出 */
+  const handleEditStop = useCallback(() => {
+    editAbortRef.current?.abort();
+    setIsSending(false);
+    setSelectedElement(null);
+  }, []);
+
+  /** 编辑模式下发送修改请求（流式版：LLM 实时返回 JSON 并在聊天区逐字展示） */
   const handleEditSend = useCallback(
     async (instruction: string) => {
       if (!activeSession.lastHtml || !selectedElement) return;
@@ -630,22 +638,46 @@ export default function App() {
         createdAt: Date.now(),
       };
 
+      // 创建流式占位消息，实时展示 LLM 返回的 JSON
+      const placeholderId = newId();
+      const placeholderMsg: ChatMessage = {
+        id: placeholderId,
+        role: "assistant",
+        content: "",
+        createdAt: Date.now(),
+      };
+
       upsertSession(activeId, (s) => ({
         ...s,
         updatedAt: Date.now(),
-        messages: [...s.messages, userMsg],
+        messages: [...s.messages, userMsg, placeholderMsg],
       }));
+
+      const controller = new AbortController();
+      editAbortRef.current = controller;
 
       setIsSending(true);
       try {
-        // 调用编辑模式专用 LLM（只返回 JSON 修改命令，不返回完整 HTML）
-        const rawReply = await chatWithLLMForEdit(
+        // 流式调用编辑模式 LLM，每收到一个 token 就实时更新聊天区
+        const rawReply = await chatWithLLMForEditStream(
           activeSession.lastHtml,
           selectedElement,
           instruction,
+          (streamedText) => {
+            // 实时更新助手消息为当前累积的 JSON 文本
+            upsertSession(activeId, (s) => ({
+              ...s,
+              messages: s.messages.map((m) =>
+                m.id === placeholderId
+                  ? { ...m, content: streamedText }
+                  : m,
+              ),
+            }));
+          },
+          controller.signal,
         );
 
-        // 从 LLM 回复中解析 JSON 命令
+        // 流式结束后，解析完整的 JSON 命令
         const commandsResult = extractEditCommands(rawReply);
 
         if (commandsResult && commandsResult.commands.length > 0) {
@@ -658,19 +690,16 @@ export default function App() {
             lastHtml: newHtml,
           }));
 
-          // 将修改说明记录为助手回复
+          // 将修改说明记录为最终的助手回复
           const explanation = commandsResult.explanation ?? generateEditExplanation(commandsResult.commands);
-          const assistant: ChatMessage = {
-            id: newId(),
-            role: "assistant",
-            content: `✅ 已按要求修改组件\n\n${explanation}\n\n\`\`\`json\n${JSON.stringify(commandsResult, null, 2)}\n\`\`\``,
-            createdAt: Date.now(),
-          };
-
           upsertSession(activeId, (s) => ({
             ...s,
             updatedAt: Date.now(),
-            messages: [...s.messages, assistant],
+            messages: s.messages.map((m) =>
+              m.id === placeholderId
+                ? { ...m, content: `✅ 已按要求修改组件\n\n${explanation}\n\n\`\`\`json\n${JSON.stringify(commandsResult, null, 2)}\n\`\`\``, createdAt: Date.now() }
+                : m,
+            ),
           }));
         } else {
           // JSON 解析失败，降级到原有完整 HTML 生成模式
@@ -719,18 +748,15 @@ ${instruction}
             null,
           );
 
-          const assistant: ChatMessage = {
-            id: newId(),
-            role: "assistant",
-            content: replyContent,
-            createdAt: Date.now(),
-          };
-
           upsertSession(activeId, (s) => ({
             ...s,
             updatedAt: Date.now(),
             tags: aiTags.length > 0 ? aiTags : s.tags,
-            messages: [...s.messages, assistant],
+            messages: s.messages.map((m) =>
+              m.id === placeholderId
+                ? { ...m, content: replyContent, createdAt: Date.now() }
+                : m,
+            ),
           }));
 
           const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
@@ -745,21 +771,32 @@ ${instruction}
         // 自动进入预览模式
         setViewMode("preview");
       } catch (err: any) {
-        // 编辑失败记录到聊天
-        const errorAssistant: ChatMessage = {
-          id: newId(),
-          role: "assistant",
-          content: `⚠️ 编辑请求失败：${err.message || "未知错误"}`,
-          createdAt: Date.now(),
-        };
-        upsertSession(activeId, (s) => ({
-          ...s,
-          messages: [...s.messages, errorAssistant],
-        }));
+        const isAbort = err?.name === "AbortError";
+        // 用户主动停止时不显示错误，只标记已停止
+        if (!isAbort) {
+          upsertSession(activeId, (s) => ({
+            ...s,
+            messages: s.messages.map((m) =>
+              m.id === placeholderId
+                ? { ...m, content: `⚠️ 编辑请求失败：${err.message || "未知错误"}`, createdAt: Date.now() }
+                : m,
+            ),
+          }));
+        } else {
+          // 停止时更新占位消息为已停止
+          upsertSession(activeId, (s) => ({
+            ...s,
+            messages: s.messages.map((m) =>
+              m.id === placeholderId
+                ? { ...m, content: m.content || "⏹ 已停止编辑", createdAt: Date.now() }
+                : m,
+            ),
+          }));
+        }
       } finally {
         setIsSending(false);
-        // 清除选中状态
         setSelectedElement(null);
+        editAbortRef.current = null;
       }
     },
     [activeId, activeSession, selectedElement, sessions, selectedStyle, upsertSession],
@@ -820,16 +857,16 @@ ${instruction}
             onElementSelect={handleElementSelect}
           />
 
-          <InputBox disabled={isSending && !isPaused} sessions={sessions} isSending={isSending} isPaused={isPaused} onTogglePause={onTogglePause} onSend={onSend} />
-
-          {/* 编辑模式浮动面板 */}
-          {editMode && selectedElement && (
+          {editMode && selectedElement ? (
             <ElementEditPanel
               element={selectedElement}
               busy={isSending}
               onSend={handleEditSend}
+              onStop={handleEditStop}
               onClose={() => setSelectedElement(null)}
             />
+          ) : (
+            <InputBox disabled={isSending && !isPaused} sessions={sessions} isSending={isSending} isPaused={isPaused} onTogglePause={onTogglePause} onSend={onSend} />
           )}
         </div>
       </div>

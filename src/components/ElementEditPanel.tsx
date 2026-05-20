@@ -1,4 +1,4 @@
-import { X, SendHorizontal, Loader2 } from "lucide-react";
+import { X, SendHorizontal, Loader2, Square } from "lucide-react";
 import { useState, type KeyboardEvent } from "react";
 import type { SelectedElement } from "../types";
 
@@ -6,10 +6,11 @@ type Props = {
   element: SelectedElement;
   busy: boolean;
   onSend: (instruction: string) => void;
+  onStop: () => void;
   onClose: () => void;
 };
 
-export function ElementEditPanel({ element, busy, onSend, onClose }: Props) {
+export function ElementEditPanel({ element, busy, onSend, onStop, onClose }: Props) {
   const [instruction, setInstruction] = useState("");
 
   const submit = () => {
@@ -27,8 +28,8 @@ export function ElementEditPanel({ element, busy, onSend, onClose }: Props) {
   };
 
   return (
-    <div className="absolute inset-x-0 bottom-16 z-20 flex justify-center px-4">
-      <div className="w-full max-w-3xl rounded-2xl border border-amber-200 bg-white/98 p-4 shadow-lg backdrop-blur-xl dark:border-amber-700 dark:bg-slate-900/98">
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center px-4 pb-4 pt-10">
+      <div className="pointer-events-auto w-full max-w-3xl rounded-2xl border border-amber-200 bg-white/98 p-4 shadow-lg backdrop-blur-xl dark:border-amber-700 dark:bg-slate-900/98">
         {/* 头部 */}
         <div className="mb-3 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
@@ -67,6 +68,17 @@ export function ElementEditPanel({ element, busy, onSend, onClose }: Props) {
 
         {/* 输入区 */}
         <div className="flex items-end gap-2">
+          {/* 停止按钮（仅在 busy 时显示） */}
+          {busy && (
+            <button
+              type="button"
+              onClick={onStop}
+              className="mb-1 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-500 text-white shadow-md shadow-red-500/30 transition hover:bg-red-600"
+              title="停止生成"
+            >
+              <Square className="h-4 w-4" />
+            </button>
+          )}
           <textarea
             rows={2}
             value={instruction}
