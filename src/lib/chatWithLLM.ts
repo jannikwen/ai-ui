@@ -442,6 +442,11 @@ export function buildEditPrompt(
     "2. 使用精确的 CSS 选择器定位目标元素（优先使用 id，其次用 class 组合）",
     "3. 样式修改使用 setStyle action，直接设置 inline style 属性",
     "4. 不要输出完整的 HTML，只输出修改命令 JSON",
+    "5. 【CSS 伪类选择器陷阱】绝对不要使用 :last-child 伪类！",
+    "   - :last-child 要求元素必须是父容器的最后一个子元素，但页面中通常还有其他元素（如 script 标签、footer 等）",
+    "   - 如果需要选择同类型的最后一个元素，请使用 :last-of-type",
+    "   - 示例：.tab-nav:last-of-type 而不是 .tab-nav:last-child",
+    "6. 【CSS 样式属性名】使用 kebab-case 格式（如 background-color），不要使用 camelCase",
     "",
     "【支持的 action 类型】",
     `- setStyle: 修改内联样式
@@ -470,7 +475,7 @@ export function buildEditPrompt(
       示例: {"action":"setOuterHtml","selector":"#old","outerHtml":"<div id='new'>新元素</div>"}`,
     `- addSibling: 在元素前后插入兄弟节点
       参数: selector, position ("before" 或 "after"), html
-      示例: {"action":"addSibling","selector":"li:last-child","position":"after","html":"<li>新项目</li>"}`,
+      示例: {"action":"addSibling","selector":"li:last-of-type","position":"after","html":"<li>新项目</li>"}`,
     "",
     "【输出格式】",
     '{"commands": [...],"explanation": "简要说明修改内容"}',

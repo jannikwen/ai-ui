@@ -65,7 +65,20 @@ export function applyEditCommands(html: string, commands: EditCommand[]): string
 
   for (const cmd of commands) {
     try {
-      const el = doc.querySelector(cmd.selector);
+      let el = doc.querySelector(cmd.selector);
+
+      // 自动修正常见的 CSS 伪类选择器陷阱
+      // `:last-child` 要求元素必须是父容器最后一个子元素，但 DOM 结构中后面通常还有其他元素
+      // 自动回退为 `:last-of-type`（匹配同类型的最后一个元素，不要求是最后一个子元素）
+      if (!el && cmd.selector.includes(":last-child")) {
+        const fallbackSelector = cmd.selector.replace(/:last-child/g, ":last-of-type");
+        el = doc.querySelector(fallbackSelector);
+        if (el) {
+          console.info(
+            `[applyEditCommands] 选择器 "${cmd.selector}" → "${fallbackSelector}" 自动修正成功`,
+          );
+        }
+      }
 
       if (!el) {
         console.warn(
