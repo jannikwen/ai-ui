@@ -61,6 +61,13 @@ export default function App() {
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
 
+  /** 编辑模式 JSON 解析失败时的弹窗状态 */
+  const [editJsonError, setEditJsonError] = useState<{
+    rawReply: string;
+    instruction: string;
+    placeholderId: string;
+  } | null>(null);
+
   /** 暂停后恢复续传所需的核心上下文，按会话 ID 独立存储 */
   const streamContextMapRef = useRef<
     Map<
@@ -627,6 +634,277 @@ export default function App() {
     setSelectedElement(null);
   }, []);
 
+  /** JSON 解析失败 — 弹窗选项1：全部重新生成（完整 HTML） */
+  const handleEditRetryFull = useCallback(async () => {
+    if (!editJsonError || !activeSession.lastHtml || !selectedElement) return;
+
+    const { rawReply, instruction, placeholderId } = editJsonError;
+    setEditJsonError(null);
+    setIsSending(true);
+
+    // 将 LLM 已输出的原始回复附加到占位消息后，作为失败记录
+    upsertSession(activeId, (s) => ({
+      ...s,
+      messages: s.messages.map((m) =>
+        m.id === placeholderId
+          ? { ...m, content: `❌ 修改指令解析失败，正在重新生成完整页面…\n\n原始回复：\n\`\`\`\n${rawReply.slice(0, 500)}\n\`\`\``, createdAt: Date.now() }
+          : m,
+      ),
+    }));
+
+    const newPlaceholderId = newId();
+    const newPlaceholderMsg: ChatMessage = {
+      id: newPlaceholderId,
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+    };
+
+    upsertSession(activeId, (s) => ({
+      ...s,
+      updatedAt: Date.now(),
+      messages: [...s.messages, newPlaceholderMsg],
+    }));
+
+    const fallbackPrompt = `【当前页面完整 HTML】
+\`\`\`html
+${activeSession.lastHtml}
+\`\`\`
+
+【用户选中的组件】
+标签：${selectedElement.tagName}
+CSS 类：${selectedElement.className}
+HTML 片段：
+\`\`\`html
+${selectedElement.outerHtml}
+\`\`\`
+
+【修改要求】
+${instruction}
+
+请仅修改指定的组件，同时保持页面其他部分不变，输出修改后的**完整 HTML 文档**（含 \`\`\`html 围栏）。`;
+
+    const sessionsContext = sessions.map((s) => ({
+      id: s.id,
+      title: s.title,
+      hasHtml: !!s.lastHtml,
+    }));
+
+    const fallbackHistory: ChatMessage[] = [
+      ...activeSession.messages.filter((m) => m.id !== placeholderId),
+      {
+        id: newId(),
+        role: "user",
+        content: fallbackPrompt,
+        createdAt: Date.now(),
+      },
+    ];
+
+    try {
+      const { content: replyContent, tags: aiTags } = await chatWithLLM(
+        fallbackHistory,
+        [],
+        selectedStyle,
+        sessionsContext,
+        null,
+      );
+
+      upsertSession(activeId, (s) => ({
+        ...s,
+        updatedAt: Date.now(),
+        tags: aiTags.length > 0 ? aiTags : s.tags,
+        messages: s.messages.map((m) =>
+          m.id === newPlaceholderId
+            ? { ...m, content: replyContent, createdAt: Date.now() }
+            : m,
+        ),
+      }));
+
+      const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
+      if (newHtml) {
+        upsertSession(activeId, (s) => ({
+          ...s,
+          lastHtml: newHtml,
+        }));
+      }
+
+      setViewMode("preview");
+    } catch (err: any) {
+      upsertSession(activeId, (s) => ({
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id === newPlaceholderId
+            ? { ...m, content: `⚠️ 重新生成失败：${err.message || "未知错误"}`, createdAt: Date.now() }
+            : m,
+        ),
+      }));
+    } finally {
+      setIsSending(false);
+      setSelectedElement(null);
+    }
+  }, [editJsonError, activeSession, selectedElement, sessions, selectedStyle, activeId, upsertSession]);
+
+  /** JSON 解析失败 — 弹窗选项2：只重新生成修改方案（重新让 LLM 生成 JSON 命令） */
+  const handleEditRetryCommands = useCallback(async () => {
+    if (!editJsonError || !activeSession.lastHtml || !selectedElement) return;
+
+    const { rawReply, instruction, placeholderId } = editJsonError;
+    setEditJsonError(null);
+    setIsSending(true);
+
+    // 将 LLM 已输出的原始回复附加到占位消息后
+    upsertSession(activeId, (s) => ({
+      ...s,
+      messages: s.messages.map((m) =>
+        m.id === placeholderId
+          ? { ...m, content: `⚠️ 修改指令解析失败，正在重新生成修改方案…\n\n原始回复：\n\`\`\`\n${rawReply.slice(0, 500)}\n\`\`\``, createdAt: Date.now() }
+          : m,
+      ),
+    }));
+
+    const newPlaceholderId = newId();
+    const newPlaceholderMsg: ChatMessage = {
+      id: newPlaceholderId,
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+    };
+
+    upsertSession(activeId, (s) => ({
+      ...s,
+      updatedAt: Date.now(),
+      messages: [...s.messages, newPlaceholderMsg],
+    }));
+
+    const retryPrompt = `【当前页面完整 HTML】
+\`\`\`html
+${activeSession.lastHtml}
+\`\`\`
+
+【用户选中的组件】
+标签：${selectedElement.tagName}
+CSS 类：${selectedElement.className}
+HTML 片段（用于提取选择器）：
+\`\`\`html
+${selectedElement.outerHtml}
+\`\`\`
+
+【修改要求】
+${instruction}
+
+【重要】你上次返回的 JSON 格式有误无法解析，请严格按照以下 JSON 格式返回编辑命令，且只需返回 JSON，不要任何额外文字。
+返回格式：
+\`\`\`json
+{
+  "commands": [
+    {
+      "action": "操作类型",
+      "selector": "CSS选择器",
+      ...
+    }
+  ],
+  "explanation": "简要说明"
+}
+\`\`\`
+
+可用的 action 及参数：
+- addSibling: { "action": "addSibling", "selector": "CSS选择器", "position": "after|before", "html": "新增的HTML" }
+- setOuterHtml: { "action": "setOuterHtml", "selector": "CSS选择器", "outerHtml": "完整的替换HTML" }
+- setStyle: { "action": "setStyle", "selector": "CSS选择器", "styles": { "color": "red" } }
+- setText: { "action": "setText", "selector": "CSS选择器", "value": "新文本" }
+- setAttribute: { "action": "setAttribute", "selector": "CSS选择器", "name": "属性名", "value": "属性值" }
+- replaceClass: { "action": "replaceClass", "selector": "CSS选择器", "oldClass": "旧类名", "newClass": "新类名" }
+- addClass: { "action": "addClass", "selector": "CSS选择器", "class": "类名" }
+- removeClass: { "action": "removeClass", "selector": "CSS选择器", "class": "类名" }
+- setHtml: { "action": "setHtml", "selector": "CSS选择器", "html": "新的内部HTML" }
+
+【关键规则】
+1. JSON 中 html/outerHtml 字段内若包含 HTML 属性双引号，必须转义为 \\"，否则 JSON 解析会失败。
+   正确示例：{"html": "<div class=\\"btn\\">文本</div>"}
+2. 选择器尽量简单可靠，优先使用 .class 或 #id，避免复杂的伪类选择器。`;
+
+    const controller = new AbortController();
+    editAbortRef.current = controller;
+
+    try {
+      const rawReply2 = await chatWithLLMForEditStream(
+        activeSession.lastHtml,
+        selectedElement,
+        retryPrompt,
+        (streamedText) => {
+          upsertSession(activeId, (s) => ({
+            ...s,
+            messages: s.messages.map((m) =>
+              m.id === newPlaceholderId
+                ? { ...m, content: streamedText }
+                : m,
+            ),
+          }));
+        },
+        controller.signal,
+      );
+
+      const commandsResult = extractEditCommands(rawReply2);
+
+      if (commandsResult && commandsResult.commands.length > 0) {
+        const newHtml = applyEditCommands(activeSession.lastHtml, commandsResult.commands);
+
+        upsertSession(activeId, (s) => ({
+          ...s,
+          lastHtml: newHtml,
+        }));
+
+        const explanation = commandsResult.explanation ?? generateEditExplanation(commandsResult.commands);
+        upsertSession(activeId, (s) => ({
+          ...s,
+          updatedAt: Date.now(),
+          messages: s.messages.map((m) =>
+            m.id === newPlaceholderId
+              ? { ...m, content: `✅ 已按要求修改组件\n\n${explanation}\n\n\`\`\`json\n${JSON.stringify(commandsResult, null, 2)}\n\`\`\``, createdAt: Date.now() }
+              : m,
+          ),
+        }));
+      } else {
+        // 再次失败，标记失败
+        upsertSession(activeId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === newPlaceholderId
+              ? { ...m, content: `❌ 再次解析修改指令失败，请手动修改或重新提出要求。\n\n原始回复：\n\`\`\`\n${rawReply2.slice(0, 500)}\n\`\`\``, createdAt: Date.now() }
+              : m,
+          ),
+        }));
+      }
+
+      setViewMode("preview");
+    } catch (err: any) {
+      const isAbort = err?.name === "AbortError";
+      if (isAbort) {
+        upsertSession(activeId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === newPlaceholderId
+              ? { ...m, content: m.content || "⏹ 已停止编辑", createdAt: Date.now() }
+              : m,
+          ),
+        }));
+      } else {
+        upsertSession(activeId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === newPlaceholderId
+              ? { ...m, content: `⚠️ 重新生成修改方案失败：${err.message || "未知错误"}`, createdAt: Date.now() }
+              : m,
+          ),
+        }));
+      }
+    } finally {
+      setIsSending(false);
+      setSelectedElement(null);
+      editAbortRef.current = null;
+    }
+  }, [editJsonError, activeSession, selectedElement, activeId, upsertSession]);
+
   /** 编辑模式下发送修改请求（流式版：LLM 实时返回 JSON 并在聊天区逐字展示） */
   const handleEditSend = useCallback(
     async (instruction: string) => {
@@ -704,70 +982,16 @@ export default function App() {
             ),
           }));
         } else {
-          // JSON 解析失败，降级到原有完整 HTML 生成模式
-          console.warn("[handleEditSend] 无法解析 LLM 返回的编辑命令，降级到完整生成模式");
+          // JSON 解析失败：弹窗让用户选择
+          console.warn("[handleEditSend] 无法解析 LLM 返回的编辑命令");
 
-          const fallbackPrompt = `【当前页面完整 HTML】
-\`\`\`html
-${activeSession.lastHtml}
-\`\`\`
-
-【用户选中的组件】
-标签：${selectedElement.tagName}
-CSS 类：${selectedElement.className}
-HTML 片段：
-\`\`\`html
-${selectedElement.outerHtml}
-\`\`\`
-
-【修改要求】
-${instruction}
-
-请仅修改指定的组件，同时保持页面其他部分不变，输出修改后的**完整 HTML 文档**（含 \`\`\`html 围栏）。`;
-
-          const sessionsContext = sessions.map((s) => ({
-            id: s.id,
-            title: s.title,
-            hasHtml: !!s.lastHtml,
-          }));
-
-          const fallbackHistory: ChatMessage[] = [
-            ...activeSession.messages,
-            userMsg,
-            {
-              id: newId(),
-              role: "user",
-              content: fallbackPrompt,
-              createdAt: Date.now(),
-            },
-          ];
-
-          const { content: replyContent, tags: aiTags } = await chatWithLLM(
-            fallbackHistory,
-            [],
-            selectedStyle,
-            sessionsContext,
-            null,
-          );
-
-          upsertSession(activeId, (s) => ({
-            ...s,
-            updatedAt: Date.now(),
-            tags: aiTags.length > 0 ? aiTags : s.tags,
-            messages: s.messages.map((m) =>
-              m.id === placeholderId
-                ? { ...m, content: replyContent, createdAt: Date.now() }
-                : m,
-            ),
-          }));
-
-          const newHtml = extractFirstHtmlCodeBlock(replyContent) ?? null;
-          if (newHtml) {
-            upsertSession(activeId, (s) => ({
-              ...s,
-              lastHtml: newHtml,
-            }));
-          }
+          // 先将已流式输出的内容保留，恢复 isSending 为 false，让 UI 不卡住
+          setIsSending(false);
+          setEditJsonError({
+            rawReply,
+            instruction,
+            placeholderId,
+          });
         }
 
         // 自动进入预览模式
@@ -872,6 +1096,41 @@ ${instruction}
           )}
         </div>
       </div>
+
+      {/* 编辑模式 JSON 解析失败弹窗 */}
+      {editJsonError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-800">
+            <div className="mb-4 flex items-start gap-3">
+              <span className="mt-0.5 text-2xl">⚠️</span>
+              <div>
+                <div className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  修改指令解析失败
+                </div>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                  LLM 返回的 JSON 格式有误，无法自动执行修改。请选择重新生成方式。
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                className="flex-1 rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+                onClick={handleEditRetryCommands}
+              >
+                再试一次
+              </button>
+              <button
+                type="button"
+                className="flex-1 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
+                onClick={handleEditRetryFull}
+              >
+                全部重新生成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
