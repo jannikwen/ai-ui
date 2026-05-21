@@ -7,41 +7,98 @@
 import type { EditCommand, EditCommandsResult } from "../types";
 
 /**
+ * 修复 JSON 字符串值中未转义的双引号（LLM 常在此处出错）。
+ * 例如："html": "<div class="foo">" → "html": "<div class=\"foo\">"
+ *
+ * 策略：html/outerHtml 字段的值是完整 HTML，HTML 总是以 > 结束，
+ * JSON 字符串值的结束引号 " 紧跟在该 > 之后。
+ * 因此定位 >" 后面是 , 或 } 的位置即为真正的 JSON 结束引号。
+ */
+function fixUnescapedQuotesInJson(jsonStr: string): string {
+  let result = jsonStr;
+
+  // 每次处理一个 html/outerHtml 字段，处理完后重新扫描
+  const fieldRegex = /"(html|outerHtml)"\s*:\s*"/g;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const match = fieldRegex.exec(result);
+    if (!match) break;
+
+    const valueStart = match.index + match[0].length; // 指向 HTML 内容第一个字符
+    // 从末尾往前找：> 后面紧跟 "，且该 " 后面是 , 或 } 或空白+} 
+    let closePos = -1;
+    for (let i = result.length - 2; i > valueStart; i--) {
+      if (result[i] === ">" && result[i + 1] === '"') {
+        const after = result.slice(i + 2).trimStart();
+        if (after.startsWith(",") || after.startsWith("}") || after === "") {
+          closePos = i + 1; // 指向这个结束 "
+          break;
+        }
+      }
+    }
+
+    if (closePos === -1) break; // 无法定位，放弃修复
+
+    const rawValue = result.slice(valueStart, closePos);
+    // 转义内部未转义的双引号
+    const escapedValue = rawValue.replace(/(?<!\\)"/g, '\\"');
+    // 重建该字段
+    const before = result.slice(0, match.index);
+    const after = result.slice(closePos + 1);
+    result = `${before}"${match[1]}": "${escapedValue}"${after}`;
+
+    // 重置 lastIndex，从修改后的字符串开头重新扫描
+    fieldRegex.lastIndex = 0;
+  }
+
+  return result;
+}
+
+/** 所有提取 + 解析尝试，都先做一次双引号修复 */
+function tryParseEditCommands(jsonText: string): EditCommandsResult | null {
+  try {
+    return JSON.parse(jsonText) as EditCommandsResult;
+  } catch {
+    // 尝试修复未转义双引号后重试
+    try {
+      const fixed = fixUnescapedQuotesInJson(jsonText);
+      return JSON.parse(fixed) as EditCommandsResult;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
  * 从 LLM 回复中提取 JSON 编辑命令。
- * 兼容 LLM 可能包裹的 ```json 围栏、Markdown 说明文字等。
+ * 兼容 LLM 可能包裹的 ```json 围栏、Markdown 说明文字等，
+ * 以及 HTML 属性双引号未转义（如 `class="foo"` 破坏 JSON）。
  */
 export function extractEditCommands(text: string): EditCommandsResult | null {
   if (!text) return null;
 
-  // 1. 尝试直接解析整段 JSON
   const trimmed = text.trim();
+
+  // 1. 尝试直接解析整段 JSON（以 { 开头）
   if (trimmed.startsWith("{")) {
-    try {
-      return JSON.parse(trimmed) as EditCommandsResult;
-    } catch {
-      // 继续尝试其他方式
-    }
+    const result = tryParseEditCommands(trimmed);
+    if (result) return result;
   }
 
   // 2. 尝试提取 ```json 围栏
   const jsonFence = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)```/i);
   if (jsonFence) {
-    try {
-      return JSON.parse(jsonFence[1]!.trim()) as EditCommandsResult;
-    } catch {
-      // 继续尝试
-    }
+    const result = tryParseEditCommands(jsonFence[1]!.trim());
+    if (result) return result;
   }
 
   // 3. 尝试提取第一个 { 到最后一个 } 之间的内容
   const firstBrace = trimmed.indexOf("{");
   const lastBrace = trimmed.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace > firstBrace) {
-    try {
-      return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)) as EditCommandsResult;
-    } catch {
-      return null;
-    }
+    const result = tryParseEditCommands(trimmed.slice(firstBrace, lastBrace + 1));
+    if (result) return result;
   }
 
   return null;
@@ -96,69 +153,162 @@ function querySelectorWithFallback(doc: Document, rawSelector: string): Element 
     }
   }
 
-  // 策略2：回退到 DOM 遍历，支持 :contains('text') 和 :has(selector)
-  // 提取 base 选择器（伪类之前的部分）和扩展伪类
-  const containsMatch = rawSelector.match(/:contains\((["'])((?:\\.|(?!\1).)*?)\1\)/g);
-  const hasMatches: string[] = [];
-  // 提取所有 :has(...)（需要平衡括号）
-  let hasSearchStr = rawSelector;
-  // 简化：提取所有 :has(...) 并移除，得到 base
+  // 策略2：回退到 DOM 遍历
+  // 将选择器拆解为：base 选择器 + 多个伪类条件，逐级过滤候选元素
+  //
+  // 支持的伪类类型：
+  //   A) 扩展伪类：:contains("text")、:has(selector) — querySelector 不支持
+  //   B) 位置伪类：:last-of-type、:first-of-type、:first-child、:last-child、
+  //                 :nth-child(n)、:nth-of-type(n)、:only-child、:only-of-type
+  //     虽然浏览器支持这些伪类，但 LLM 经常选错，在 DOMParser 文档中匹配不到
+  //     因此也走 fallback：用 base 获取所有候选，再按位置伪类选对应的元素
   {
-    let depth = 0;
-    let start = -1;
-    const parts: { start: number; end: number }[] = [];
-    for (let i = 0; i < hasSearchStr.length; i++) {
-      if (hasSearchStr.slice(i, i + 4) === ":has" && hasSearchStr[i + 4] === "(") {
-        start = i;
-        depth = 0;
-        i += 4; // skip "has"
-      }
-      if (start >= 0) {
-        if (hasSearchStr[i] === "(") depth++;
-        else if (hasSearchStr[i] === ")") {
-          depth--;
-          if (depth === 0) {
-            const inner = hasSearchStr.slice(start + 5, i); // strip ":has("
-            hasMatches.push(inner);
-            parts.push({ start, end: i });
-            start = -1;
-          }
-        }
-      }
+    // 1. 提取所有带括号的伪类：:contains(...)、:has(...)、:nth-child(...)、:nth-of-type(...)
+    const bracketPseudos: { raw: string; type: string; arg: string }[] = [];
+    const bracketRegex = /:(contains|has|nth-child|nth-of-type)\((["']?)([^)]*?)\2\)/gi;
+    let m: RegExpExecArray | null;
+    // eslint-disable-next-line no-cond-assign
+    while ((m = bracketRegex.exec(rawSelector)) !== null) {
+      bracketPseudos.push({ raw: m[0], type: m[1]!.toLowerCase(), arg: m[3]! });
     }
 
-    // 构建 base 选择器（移除所有 :has(...) 和 :contains(...)）
+    // 2. 提取无括号的位置伪类：:first-child、:last-child、:first-of-type、:last-of-type、:only-child、:only-of-type
+    const positionPseudos: string[] = [];
+    const positionRegex = /:(first-child|last-child|first-of-type|last-of-type|only-child|only-of-type)(?=[\s:,.\[#]|$)/gi;
+    // eslint-disable-next-line no-cond-assign
+    while ((m = positionRegex.exec(rawSelector)) !== null) {
+      positionPseudos.push(m[0].slice(1)); // 去掉前导 ":"
+    }
+
+    // 3. 构建 base 选择器：移除所有伪类
     let base = rawSelector;
-    for (const part of parts.reverse()) {
-      base = base.slice(0, part.start) + base.slice(part.end + 1);
+    // 移除所有 bracket 伪类
+    for (const bp of bracketPseudos) {
+      base = base.replace(bp.raw, "");
     }
-    // 也移除 :contains
-    base = base.replace(/:contains\((["'])(?:\\.|(?!\1).)*?\1\)/g, "").trim();
-    // 清理多余伪类分隔符和空格
+    // 移除所有无括号位置伪类
+    for (const pp of new Set(positionPseudos)) {
+      base = base.replace(new RegExp(`:${pp}`, "gi"), "");
+    }
+    // 清理：连续冒号、多余空格
     base = base.replace(/:\s*:/g, ":").replace(/\s+/g, " ").trim();
+    // 清理末尾残留的冒号
+    base = base.replace(/:$/, "").trim();
 
-    if (!base || base === ":") return null;
+    if (!base) return null;
 
-    // 获取所有匹配 base 选择器的元素
+    // 4. 获取所有候选元素
     let candidates: Element[] = [];
     try {
       candidates = Array.from(doc.querySelectorAll(base));
     } catch {
       return null;
     }
+    if (candidates.length === 0) return null;
 
-    // 过滤 :has 条件
-    for (const hasInner of hasMatches) {
-      candidates = candidates.filter((el) => el.querySelector(hasInner.trim()));
+    // 5. 过滤 :has 条件
+    for (const bp of bracketPseudos) {
+      if (bp.type === "has") {
+        candidates = candidates.filter((el) => {
+          try { return el.querySelector(bp.arg.trim()); } catch { return false; }
+        });
+      }
     }
 
-    // 过滤 :contains 条件
-    for (const cm of containsMatch ?? []) {
-      const textMatch = cm.match(/:contains\((["'])((?:\\.|(?!\1).)*?)\1\)/);
-      if (textMatch) {
-        const searchText = textMatch[2]!;
+    // 6. 过滤 :contains 条件
+    for (const bp of bracketPseudos) {
+      if (bp.type === "contains") {
+        const searchText = bp.arg;
         candidates = candidates.filter((el) =>
           (el.textContent ?? "").includes(searchText),
+        );
+      }
+    }
+
+    // 7. 按位置伪类选择对应的元素
+    for (const pp of positionPseudos) {
+      switch (pp) {
+        case "first-child":
+          candidates = candidates.filter(
+            (el) => el.parentElement?.children[0] === el,
+          );
+          break;
+        case "last-child":
+          candidates = candidates.filter(
+            (el) => {
+              const p = el.parentElement;
+              return p && p.children[p.children.length - 1] === el;
+            },
+          );
+          break;
+        case "first-of-type":
+          candidates = candidates.filter(
+            (el) => {
+              const siblings = el.parentElement?.children;
+              if (!siblings) return false;
+              for (let i = 0; i < siblings.length; i++) {
+                if (siblings[i]!.tagName === el.tagName) {
+                  return siblings[i] === el;
+                }
+              }
+              return false;
+            },
+          );
+          break;
+        case "last-of-type":
+          candidates = candidates.filter(
+            (el) => {
+              const siblings = el.parentElement?.children;
+              if (!siblings) return false;
+              for (let i = siblings.length - 1; i >= 0; i--) {
+                if (siblings[i]!.tagName === el.tagName) {
+                  return siblings[i] === el;
+                }
+              }
+              return false;
+            },
+          );
+          break;
+        case "only-child":
+          candidates = candidates.filter(
+            (el) => (el.parentElement?.children.length ?? 0) === 1,
+          );
+          break;
+        case "only-of-type":
+          candidates = candidates.filter(
+            (el) => {
+              const siblings = Array.from(el.parentElement?.children ?? []);
+              return siblings.filter((s) => s.tagName === el.tagName).length === 1;
+            },
+          );
+          break;
+        default:
+          break;
+      }
+    }
+
+    // 8. 处理 :nth-child / :nth-of-type
+    for (const bp of bracketPseudos) {
+      const n = parseInt(bp.arg, 10);
+      if (isNaN(n) || n < 1) continue;
+      if (bp.type === "nth-child") {
+        candidates = candidates.filter(
+          (el) => {
+            const idx = Array.from(el.parentElement?.children ?? []).indexOf(el);
+            return idx + 1 === n;
+          },
+        );
+      } else if (bp.type === "nth-of-type") {
+        candidates = candidates.filter(
+          (el) => {
+            const siblings = el.parentElement?.children ?? [];
+            let count = 0;
+            for (let i = 0; i < siblings.length; i++) {
+              if (siblings[i]!.tagName === el.tagName) count++;
+              if (siblings[i] === el) return count === n;
+            }
+            return false;
+          },
         );
       }
     }

@@ -451,6 +451,10 @@ export function buildEditPrompt(
     "   - :contains() 和 :has() 不是标准 CSS 选择器，document.querySelector 不支持，会导致命令执行失败",
     "   - 需要按文本内容匹配时，请改用 id、class 或 data-* 属性等标准选择器",
     "   - 示例：.tab-btn[data-tab='tab2'] 而不是 a:contains('新建合同')",
+    "8. 【JSON 中 HTML 属性引号必须转义】html / outerHtml 字段值是 HTML 片段，",
+    "   内部包含 class=\"xxx\" 等属性，必须将属性值的双引号转义为 \\\"！",
+    "   - 正确：{\"html\": \"<div class=\\\"btn\\\">文本</div>\"}",
+    "   - 错误：{\"html\": \"<div class=\"btn\">文本</div>\"}（未转义的双引号会破坏 JSON 结构）",
     "",
     "【支持的 action 类型】",
     `- setStyle: 修改内联样式
