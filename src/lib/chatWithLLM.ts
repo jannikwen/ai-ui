@@ -447,6 +447,10 @@ export function buildEditPrompt(
     "   - 如果需要选择同类型的最后一个元素，请使用 :last-of-type",
     "   - 示例：.tab-nav:last-of-type 而不是 .tab-nav:last-child",
     "6. 【CSS 样式属性名】使用 kebab-case 格式（如 background-color），不要使用 camelCase",
+    "7. 【禁止使用非标准选择器】绝对不要使用 :contains()、:has() 这类 jQuery 扩展伪类！",
+    "   - :contains() 和 :has() 不是标准 CSS 选择器，document.querySelector 不支持，会导致命令执行失败",
+    "   - 需要按文本内容匹配时，请改用 id、class 或 data-* 属性等标准选择器",
+    "   - 示例：.tab-btn[data-tab='tab2'] 而不是 a:contains('新建合同')",
     "",
     "【支持的 action 类型】",
     `- setStyle: 修改内联样式
