@@ -78,8 +78,10 @@ export function applyEditCommands(html: string, commands: EditCommand[]): string
         case "setStyle": {
           const styleTarget = el as HTMLElement;
           for (const [prop, val] of Object.entries(cmd.styles)) {
-            // 使用 CSSStyleDeclaration.setProperty() 设置样式，支持 kebab-case
-            styleTarget.style.setProperty(prop, val);
+            // LLM 返回的 CSS 属性名可能是 camelCase（如 backgroundColor），
+            // 需要转换为 kebab-case（如 background-color）才能被 setProperty 正确识别
+            const kebabProp = prop.replace(/([A-Z])/g, "-$1").toLowerCase();
+            styleTarget.style.setProperty(kebabProp, val);
           }
           break;
         }
