@@ -91,11 +91,13 @@ export function InputBox({ disabled, sessions, isSending, isPaused, onTogglePaus
     if (!trimmed && urls.length === 0) return;
     if (disabled || busy) return;
     setBusy(true);
+    // 立即清空输入，避免等待流式生成完成后才消失
+    const capturedRefId = refId;
+    setText("");
+    setImages([]);
+    setRefId(null);
     try {
-      await onSend(trimmed, urls, refId);
-      setText("");
-      setImages([]);
-      setRefId(null);
+      await onSend(trimmed, urls, capturedRefId);
     } finally {
       setBusy(false);
     }

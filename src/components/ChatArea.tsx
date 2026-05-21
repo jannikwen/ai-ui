@@ -1,5 +1,6 @@
-import { Bot, Edit3, Moon, Sun, User } from "lucide-react";
-import { assistantChatDisplayText } from "../lib/extractHtmlFromMarkdown";
+import { useState } from "react";
+import { Bot, ChevronDown, ChevronRight, Code2, Edit3, Moon, Sun, User } from "lucide-react";
+import { parseAssistantContent } from "../lib/extractHtmlFromMarkdown";
 import type { ChatMessage, MainViewMode, SelectedElement } from "../types";
 import { PreviewSandbox } from "./PreviewSandbox";
 import { CodePanel } from "./CodePanel";
@@ -210,9 +211,11 @@ export function ChatArea({
                       </div>
                     )}
                     <div className="whitespace-pre-wrap break-words">
-                      {m.role === "assistant"
-                        ? assistantChatDisplayText(m.content)
-                        : m.content}
+                      {m.role === "assistant" ? (
+                        <AssistantMessageContent content={m.content} />
+                      ) : (
+                        m.content
+                      )}
                     </div>
                     {busy &&
                       m.role === "assistant" &&
@@ -226,6 +229,51 @@ export function ChatArea({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** 助手消息内容：HTML 代码块可折叠/展开 */
+function AssistantMessageContent({ content }: { content: string }) {
+  const parsed = parseAssistantContent(content);
+  const [expanded, setExpanded] = useState(false);
+
+  if (!parsed.hasHtml) {
+    return <>{content}</>;
+  }
+
+  return (
+    <div>
+      {parsed.before}
+      {parsed.before && "\n\n"}
+      {/* 折叠/展开 HTML 代码块按钮 */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="group my-2 inline-flex w-full items-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs font-medium text-slate-600 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:border-sky-600 dark:hover:bg-sky-500/10 dark:hover:text-sky-300"
+      >
+        {expanded ? (
+          <ChevronDown className="h-4 w-4 shrink-0" />
+        ) : (
+          <ChevronRight className="h-4 w-4 shrink-0" />
+        )}
+        <Code2 className="h-3.5 w-3.5 shrink-0" />
+        <span className="flex-1">
+          {expanded ? "收起 HTML 原型代码" : "展开 HTML 原型代码"}
+        </span>
+        <span className="shrink-0 text-[10px] text-slate-400 group-hover:text-sky-400">
+          {parsed.htmlBlock.length.toLocaleString()} 字符
+        </span>
+      </button>
+      {/* 展开时显示 HTML 代码 */}
+      {expanded && (
+        <pre className="my-2 max-h-80 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs leading-relaxed text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+          <code>{parsed.htmlBlock}</code>
+        </pre>
+      )}
+      {parsed.after && (
+        <div className="mt-2">{parsed.after}</div>
+      )}
     </div>
   );
 }

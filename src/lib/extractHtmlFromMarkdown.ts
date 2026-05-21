@@ -87,25 +87,51 @@ export function hasRenderableHtmlInMarkdown(markdown: string): boolean {
   return extractFirstHtmlCodeBlock(markdown) !== null;
 }
 
+export type ParsedAssistantContent = {
+  /** 是否有 HTML 代码块 */
+  hasHtml: boolean;
+  /** HTML 代码块之前的文本 */
+  before: string;
+  /** HTML 代码块原始内容（含 ``` 标记） */
+  htmlBlock: string;
+  /** HTML 代码块之后的文本 */
+  after: string;
+};
+
 /**
- * 聊天区展示助手回复：去掉被选中的 HTML 围栏正文，避免整段源码刷屏；
- * 仍保留围栏前后的说明文字，并提示使用「预览 / 代码」。
+ * 解析助手回复为三部分，便于聊天区按需渲染可折叠 HTML 代码块。
  */
-export function assistantChatDisplayText(markdown: string): string {
-  if (!markdown) return "";
+export function parseAssistantContent(markdown: string): ParsedAssistantContent {
+  if (!markdown) return { hasHtml: false, before: "", htmlBlock: "", after: "" };
   const norm = normalizeMarkdown(markdown);
   const picked = pickBestHtmlFence(norm);
-  if (!picked) return markdown;
+  if (!picked) {
+    return { hasHtml: false, before: markdown, htmlBlock: "", after: "" };
+  }
 
   const before = norm.slice(0, picked.start).trimEnd();
   const after = norm.slice(picked.end).trimStart();
-  const kept = [before, after].filter((s) => s.length > 0).join("\n\n").trim();
+  // 还原原始标记中的围栏内容（用原始 markdown 提取以保留格式）
+  const origFenceMatch = markdown.match(
+    /```\s*[^\n\r`]*?\s*\r?\n[\s\S]*?```/
+  );
+  const htmlBlock = origFenceMatch?.[0] ?? norm.slice(picked.start, picked.end);
 
+  return { hasHtml: true, before, htmlBlock, after };
+}
+
+/**
+ * 聊天区展示助手回复（旧版：直接删除 HTML 代码块）。
+ */
+export function assistantChatDisplayText(markdown: string): string {
+  if (!markdown) return "";
+  const parsed = parseAssistantContent(markdown);
+  if (!parsed.hasHtml) return markdown;
+  const kept = [parsed.before, parsed.after].filter((s) => s.length > 0).join("\n\n").trim();
   const hint =
     "────────────────────────────────\n" +
     "已生成 **HTML 界面原型**（长代码已在聊天中折叠）。\n" +
     "请点顶部「**预览**」在 iframe 中渲染页面，或点「**代码**」查看 / 导出。";
-
   return kept ? `${kept}\n\n${hint}` : hint;
 }
 
