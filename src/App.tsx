@@ -66,6 +66,7 @@ export default function App() {
     rawReply: string;
     instruction: string;
     placeholderId: string;
+    images: string[];
   } | null>(null);
 
   /** 暂停后恢复续传所需的核心上下文，按会话 ID 独立存储 */
@@ -638,7 +639,7 @@ export default function App() {
   const handleEditRetryFull = useCallback(async () => {
     if (!editJsonError || !activeSession.lastHtml || !selectedElement) return;
 
-    const { rawReply, instruction, placeholderId } = editJsonError;
+    const { rawReply, instruction, placeholderId, images } = editJsonError;
     setEditJsonError(null);
     setIsSending(true);
 
@@ -703,7 +704,7 @@ ${instruction}
     try {
       const { content: replyContent, tags: aiTags } = await chatWithLLM(
         fallbackHistory,
-        [],
+        images.length ? images : [],
         selectedStyle,
         sessionsContext,
         null,
@@ -748,7 +749,7 @@ ${instruction}
   const handleEditRetryCommands = useCallback(async () => {
     if (!editJsonError || !activeSession.lastHtml || !selectedElement) return;
 
-    const { rawReply, instruction, placeholderId } = editJsonError;
+    const { rawReply, instruction, placeholderId, images } = editJsonError;
     setEditJsonError(null);
     setIsSending(true);
 
@@ -842,6 +843,7 @@ ${instruction}
           }));
         },
         controller.signal,
+        images.length ? images : undefined,
       );
 
       const commandsResult = extractEditCommands(rawReply2);
@@ -992,6 +994,7 @@ ${instruction}
             rawReply,
             instruction,
             placeholderId,
+            images: images.length ? images : [],
           });
         }
 
