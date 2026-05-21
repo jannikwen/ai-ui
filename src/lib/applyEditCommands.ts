@@ -225,6 +225,9 @@ function querySelectorWithFallback(doc: Document, rawSelector: string): Element 
       }
     }
 
+    // 保存位置过滤前的候选（用于保底回退）
+    const candidatesBeforePos = candidates.slice();
+
     // 7. 按位置伪类选择对应的元素
     for (const pp of positionPseudos) {
       switch (pp) {
@@ -310,6 +313,27 @@ function querySelectorWithFallback(doc: Document, rawSelector: string): Element 
             return false;
           },
         );
+      }
+    }
+
+    // 9. 保底：如果严格按位置伪类过滤后为空，且存在位置伪类，
+    //    说明 LLM 可能用错了 :last-of-type / :first-of-type 等选择器
+    //    （对 LLM 来说通常意思是"最后一个匹配的"，而非"最后一个该标签类型的"）
+    //    此时回退：在未过滤的候选中，按位置伪类的直觉含义选取对应元素
+    if (candidates.length === 0 && positionPseudos.length > 0 && candidatesBeforePos.length > 0) {
+      const lastPos = positionPseudos[positionPseudos.length - 1]!;
+      switch (lastPos) {
+        case "last-child":
+        case "last-of-type":
+          candidates = [candidatesBeforePos[candidatesBeforePos.length - 1]!];
+          break;
+        case "first-child":
+        case "first-of-type":
+          candidates = [candidatesBeforePos[0]!];
+          break;
+        // only-child / only-of-type 不保底（要求过于严格，回退无意义）
+        default:
+          break;
       }
     }
 
