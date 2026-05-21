@@ -907,7 +907,7 @@ ${instruction}
 
   /** 编辑模式下发送修改请求（流式版：LLM 实时返回 JSON 并在聊天区逐字展示） */
   const handleEditSend = useCallback(
-    async (instruction: string) => {
+    async (instruction: string, images: string[]) => {
       if (!activeSession.lastHtml || !selectedElement) return;
 
       // 记录用户修改指令到聊天
@@ -915,6 +915,7 @@ ${instruction}
         id: newId(),
         role: "user",
         content: `【编辑模式】修改选中组件（${selectedElement.tagName}${selectedElement.id ? `#${selectedElement.id}` : ""}）：${instruction}`,
+        imageDataUrls: images.length ? images : undefined,
         createdAt: Date.now(),
       };
 
@@ -936,6 +937,7 @@ ${instruction}
       const controller = new AbortController();
       editAbortRef.current = controller;
 
+      let shouldClearElement = true;
       setIsSending(true);
       try {
         // 流式调用编辑模式 LLM，每收到一个 token 就实时更新聊天区
@@ -955,6 +957,7 @@ ${instruction}
             }));
           },
           controller.signal,
+          images.length ? images : undefined,
         );
 
         // 流式结束后，解析完整的 JSON 命令
@@ -982,11 +985,9 @@ ${instruction}
             ),
           }));
         } else {
-          // JSON 解析失败：弹窗让用户选择
+          // JSON 解析失败：弹窗让用户选择，保留 selectedElement 供重试使用
           console.warn("[handleEditSend] 无法解析 LLM 返回的编辑命令");
-
-          // 先将已流式输出的内容保留，恢复 isSending 为 false，让 UI 不卡住
-          setIsSending(false);
+          shouldClearElement = false;
           setEditJsonError({
             rawReply,
             instruction,
@@ -1021,7 +1022,9 @@ ${instruction}
         }
       } finally {
         setIsSending(false);
-        setSelectedElement(null);
+        if (shouldClearElement) {
+          setSelectedElement(null);
+        }
         editAbortRef.current = null;
       }
     },

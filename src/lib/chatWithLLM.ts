@@ -639,6 +639,7 @@ export async function chatWithLLMForEditStream(
   instruction: string,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  images?: string[],
 ): Promise<string> {
   const { apiBase, apiKey, model, useRealApi } = getLlmEnv();
 
@@ -657,9 +658,24 @@ export async function chatWithLLMForEditStream(
 
   const systemPrompt = buildEditPrompt(html, element, instruction);
 
+  // 如果有图片，user content 需要是 multimodal 格式
+  const userContent: string | object[] =
+    images && images.length > 0
+      ? [
+          {
+            type: "text" as const,
+            text: instruction.trim() || "请结合图片和修改要求编辑该组件。",
+          },
+          ...images.map((url) => ({
+            type: "image_url" as const,
+            image_url: { url },
+          })),
+        ]
+      : instruction;
+
   const payloadMessages: OpenAIChatMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: instruction },
+    { role: "user", content: userContent },
   ];
 
   const res = await fetch(`${apiBase}/chat/completions`, {

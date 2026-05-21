@@ -1,23 +1,37 @@
-import { X, SendHorizontal, Loader2, Square } from "lucide-react";
-import { useState, type KeyboardEvent } from "react";
+import { Paperclip, X, SendHorizontal, Loader2, Square } from "lucide-react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import type { SelectedElement } from "../types";
+
+type PendingImage = {
+  id: string;
+  dataUrl: string;
+};
+
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const MAX_IMAGES = 6;
 
 type Props = {
   element: SelectedElement;
   busy: boolean;
-  onSend: (instruction: string) => void;
+  onSend: (instruction: string, images: string[]) => void;
   onStop: () => void;
   onClose: () => void;
 };
 
 export function ElementEditPanel({ element, busy, onSend, onStop, onClose }: Props) {
   const [instruction, setInstruction] = useState("");
+  const [images, setImages] = useState<PendingImage[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const submit = () => {
     const trimmed = instruction.trim();
     if (!trimmed || busy) return;
-    onSend(trimmed);
+    onSend(
+      trimmed,
+      images.map((i) => i.dataUrl),
+    );
     setInstruction("");
+    setImages([]);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -25,6 +39,48 @@ export function ElementEditPanel({ element, busy, onSend, onStop, onClose }: Pro
       e.preventDefault();
       submit();
     }
+  };
+
+  const addFiles = (list: FileList | null) => {
+    if (!list?.length) return;
+    const incoming = Array.from(list).filter((f) => f.type.startsWith("image/"));
+
+    setImages((prev) => {
+      const room = MAX_IMAGES - prev.length;
+      if (room <= 0) {
+        window.alert(`最多只能添加 ${MAX_IMAGES} 张图片。`);
+        return prev;
+      }
+
+      const toRead = incoming.slice(0, room);
+      for (const file of toRead) {
+        if (file.size > MAX_IMAGE_BYTES) {
+          window.alert(`图片「${file.name}」超过 6MB，已跳过。`);
+          continue;
+        }
+        const id = crypto.randomUUID();
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = String(reader.result || "");
+          if (!dataUrl.startsWith("data:image/")) return;
+          setImages((cur) => {
+            if (cur.length >= MAX_IMAGES) return cur;
+            if (cur.some((i) => i.id === id)) return cur;
+            return [...cur, { id, dataUrl }];
+          });
+        };
+        reader.onerror = () => {
+          window.alert(`读取「${file.name}」失败，请重试。`);
+        };
+        reader.readAsDataURL(file);
+      }
+
+      return prev;
+    });
+  };
+
+  const removeImage = (id: string) => {
+    setImages((prev) => prev.filter((i) => i.id !== id));
   };
 
   return (
@@ -66,8 +122,58 @@ export function ElementEditPanel({ element, busy, onSend, onStop, onClose }: Pro
           </button>
         </div>
 
+        {/* 图片预览区 */}
+        {images.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {images.map((img) => (
+              <div
+                key={img.id}
+                className="relative inline-flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-slate-200 dark:border-slate-600"
+              >
+                <img
+                  src={img.dataUrl}
+                  alt="附件"
+                  className="h-full w-full object-cover"
+                />
+                {!busy && (
+                  <button
+                    type="button"
+                    onClick={() => removeImage(img.id)}
+                    className="absolute -right-1 -top-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-700/80 text-white transition hover:bg-red-500"
+                    title="移除图片"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* 输入区 */}
         <div className="flex items-end gap-2">
+          {/* 上传图片按钮 */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              addFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            disabled={busy || images.length >= MAX_IMAGES}
+            onClick={() => fileInputRef.current?.click()}
+            className="mb-1 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
+            title="添加图片"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
+
           {/* 停止按钮（仅在 busy 时显示） */}
           {busy && (
             <button
